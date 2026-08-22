@@ -1,0 +1,765 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type {
+  BantQualification,
+  Lead,
+  LeadStatus,
+  OutreachContent,
+  WebEnrichment,
+} from "@/lib/types";
+
+const POLL_INTERVAL_MS = 5000;
+
+const STATUS_STYLES: Record<LeadStatus, string> = {
+  new: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  qualified: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  unqualified: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+  needs_more_info: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+};
+
+const STATUS_LABELS: Record<LeadStatus, string> = {
+  new: "New",
+  qualified: "Qualified",
+  unqualified: "Unqualified",
+  needs_more_info: "Needs Info",
+};
+
+const BANT_DIMENSIONS = [
+  { key: "budget", label: "Budget" },
+  { key: "authority", label: "Authority" },
+  { key: "need", label: "Need" },
+  { key: "timeline", label: "Timeline" },
+] as const;
+
+interface FormState {
+  name: string;
+  email: string;
+  phone: string;
+  company: string;
+  message: string;
+}
+
+const EMPTY_FORM: FormState = {
+  name: "",
+  email: "",
+  phone: "",
+  company: "",
+  message: "",
+};
+
+interface ProspectFormState {
+  industry: string;
+  location: string;
+}
+
+const EMPTY_PROSPECT_FORM: ProspectFormState = {
+  industry: "",
+  location: "",
+};
+
+interface ProspectResult {
+  found: number;
+  imported: Lead[];
+  skipped: number;
+}
+
+type Tab = "submit" | "discover";
+
+function StatusBadge({ status }: { status: LeadStatus }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${STATUS_STYLES[status]}`}
+    >
+      {STATUS_LABELS[status]}
+    </span>
+  );
+}
+
+function ScoreBar({ label, score }: { label: string; score: number }) {
+  const pct = Math.max(0, Math.min(10, score)) * 10;
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="w-16 shrink-0 text-zinc-500 dark:text-zinc-400">{label}</span>
+      <div className="h-1.5 flex-1 rounded-full bg-zinc-200 dark:bg-zinc-800">
+        <div
+          className="h-1.5 rounded-full bg-zinc-900 dark:bg-zinc-100"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="w-6 shrink-0 text-right text-zinc-500 dark:text-zinc-400">
+        {score}
+      </span>
+    </div>
+  );
+}
+
+function BantBreakdown({ bant }: { bant: BantQualification }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      {BANT_DIMENSIONS.map(({ key, label }) => (
+        <ScoreBar key={key} label={label} score={bant[key].score} />
+      ))}
+    </div>
+  );
+}
+
+function EnrichmentSummary({ enrichment }: { enrichment: WebEnrichment }) {
+  if (enrichment.error) {
+    return (
+      <p className="text-xs text-zinc-400 dark:text-zinc-600">
+        Website enrichment failed: {enrichment.error}
+      </p>
+    );
+  }
+
+  const social = Object.entries(enrichment.socialLinks);
+  if (enrichment.emails.length === 0 && social.length === 0 && !enrichment.description) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-col gap-1 text-xs text-zinc-500 dark:text-zinc-400">
+      {enrichment.emails.length > 0 && <p>✉️ {enrichment.emails.join(", ")}</p>}
+      {social.length > 0 && (
+        <p>
+          {social.map(([platform, url]) => (
+            <a
+              key={platform}
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="mr-3 underline decoration-dotted hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              {platform}
+            </a>
+          ))}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // clipboard access denied — nothing actionable to do here
+        }
+      }}
+      className="rounded-md border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-900 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-zinc-100"
+    >
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+function OutreachModal({
+  lead,
+  content,
+  loading,
+  error,
+  onClose,
+}: {
+  lead: Lead;
+  content: OutreachContent | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-800 dark:bg-zinc-950"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+              Outreach · {lead.name ?? lead.company ?? "Lead"}
+            </h2>
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+              Spanish WhatsApp pitch + email template for Costa Rican SMB outreach
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+
+        {loading && (
+          <p className="mt-6 text-sm text-zinc-500 dark:text-zinc-400">
+            Generating outreach with Gemini...
+          </p>
+        )}
+
+        {error && (
+          <p className="mt-6 text-sm text-red-600 dark:text-red-400">{error}</p>
+        )}
+
+        {content && !loading && (
+          <div className="mt-6 flex flex-col gap-6">
+            <div>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  WhatsApp pitch
+                </h3>
+                <CopyButton text={content.whatsapp_pitch} />
+              </div>
+              <p className="mt-2 whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 text-sm text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
+                {content.whatsapp_pitch}
+              </p>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Email
+                </h3>
+                <CopyButton text={`${content.email_subject}\n\n${content.email_body}`} />
+              </div>
+              <p className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                {content.email_subject}
+              </p>
+              <p className="mt-1 whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 text-sm text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
+                {content.email_body}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function Home() {
+  const [activeTab, setActiveTab] = useState<Tab>("submit");
+
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastResult, setLastResult] = useState<{
+    lead: Lead;
+    qualification: BantQualification;
+  } | null>(null);
+
+  const [prospectForm, setProspectForm] = useState<ProspectFormState>(
+    EMPTY_PROSPECT_FORM
+  );
+  const [prospecting, setProspecting] = useState(false);
+  const [prospectError, setProspectError] = useState<string | null>(null);
+  const [prospectResult, setProspectResult] = useState<ProspectResult | null>(
+    null
+  );
+
+  const [qualifyingIds, setQualifyingIds] = useState<Set<string>>(new Set());
+  const [qualifyErrors, setQualifyErrors] = useState<Record<string, string>>({});
+  const [bulkQualifying, setBulkQualifying] = useState(false);
+  const [bulkSummary, setBulkSummary] = useState<{
+    succeeded: number;
+    failed: number;
+  } | null>(null);
+
+  const [outreachLead, setOutreachLead] = useState<Lead | null>(null);
+  const [outreachContent, setOutreachContent] = useState<OutreachContent | null>(
+    null
+  );
+  const [outreachLoading, setOutreachLoading] = useState(false);
+  const [outreachError, setOutreachError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch("/api/leads");
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setLeads(data.leads ?? []);
+      } catch {
+        // silent: polling failures shouldn't disrupt the dashboard
+      }
+    };
+
+    const interval = setInterval(load, POLL_INTERVAL_MS);
+    load();
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/qualify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error ?? "Failed to qualify lead");
+        return;
+      }
+
+      setLastResult({ lead: data.lead, qualification: data.qualification });
+      setForm(EMPTY_FORM);
+      setLeads((prev) => {
+        const rest = prev.filter((l) => l.id !== data.lead.id);
+        return [data.lead as Lead, ...rest];
+      });
+    } catch {
+      setError("Network error while qualifying lead");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleProspect(e: React.FormEvent) {
+    e.preventDefault();
+    setProspecting(true);
+    setProspectError(null);
+
+    try {
+      const res = await fetch("/api/prospecting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prospectForm),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setProspectError(data.error ?? "Failed to discover businesses");
+        return;
+      }
+
+      const result = data as ProspectResult;
+      setProspectResult(result);
+
+      if (result.imported.length > 0) {
+        setLeads((prev) => {
+          const importedIds = new Set(result.imported.map((l) => l.id));
+          const rest = prev.filter((l) => !importedIds.has(l.id));
+          return [...result.imported, ...rest];
+        });
+      }
+    } catch {
+      setProspectError("Network error while discovering businesses");
+    } finally {
+      setProspecting(false);
+    }
+  }
+
+  async function qualifyLead(leadId: string): Promise<boolean> {
+    setQualifyingIds((prev) => new Set(prev).add(leadId));
+    setQualifyErrors((prev) => {
+      const next = { ...prev };
+      delete next[leadId];
+      return next;
+    });
+
+    try {
+      const res = await fetch(`/api/leads/${leadId}/qualify`, { method: "POST" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setQualifyErrors((prev) => ({
+          ...prev,
+          [leadId]: data.error ?? "Qualification failed",
+        }));
+        return false;
+      }
+
+      setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
+      return true;
+    } catch {
+      setQualifyErrors((prev) => ({
+        ...prev,
+        [leadId]: "Network error while qualifying lead",
+      }));
+      return false;
+    } finally {
+      setQualifyingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(leadId);
+        return next;
+      });
+    }
+  }
+
+  async function qualifyAllUnscored() {
+    const targets = leads.filter((l) => l.status === "new").map((l) => l.id);
+    if (targets.length === 0) return;
+
+    setBulkQualifying(true);
+    setBulkSummary(null);
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const id of targets) {
+      const ok = await qualifyLead(id);
+      if (ok) succeeded += 1;
+      else failed += 1;
+    }
+
+    setBulkSummary({ succeeded, failed });
+    setBulkQualifying(false);
+  }
+
+  async function openOutreach(lead: Lead) {
+    setOutreachLead(lead);
+    setOutreachContent(null);
+    setOutreachError(null);
+    setOutreachLoading(true);
+
+    try {
+      const res = await fetch(`/api/leads/${lead.id}/outreach`, { method: "POST" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setOutreachError(data.error ?? "Failed to generate outreach");
+        return;
+      }
+
+      setOutreachContent(data.outreach as OutreachContent);
+      setLeads((prev) => prev.map((l) => (l.id === lead.id ? (data.lead as Lead) : l)));
+    } catch {
+      setOutreachError("Network error while generating outreach");
+    } finally {
+      setOutreachLoading(false);
+    }
+  }
+
+  function closeOutreach() {
+    setOutreachLead(null);
+    setOutreachContent(null);
+    setOutreachError(null);
+  }
+
+  return (
+    <div className="flex-1 bg-zinc-50 dark:bg-black">
+      <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-12">
+        <header>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+            Prospect Lead Engine
+          </h1>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+            Submit a prospect, get an instant AI BANT qualification, and track the pipeline.
+          </p>
+        </header>
+
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">
+          <section className="lg:col-span-2">
+            <div className="inline-flex rounded-lg border border-zinc-200 p-1 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setActiveTab("submit")}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  activeTab === "submit"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
+                }`}
+              >
+                Submit Prospect
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("discover")}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  activeTab === "discover"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
+                }`}
+              >
+                Discover Businesses
+              </button>
+            </div>
+
+            {activeTab === "submit" && (
+              <>
+                <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950">
+                  <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                    Submit prospect
+                  </h2>
+                  <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
+                    <input
+                      required
+                      placeholder="Name"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <input
+                      required
+                      type="email"
+                      placeholder="Email"
+                      value={form.email}
+                      onChange={(e) => setForm({ ...form, email: e.target.value })}
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <input
+                      placeholder="Phone"
+                      value={form.phone}
+                      onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <input
+                      placeholder="Company"
+                      value={form.company}
+                      onChange={(e) => setForm({ ...form, company: e.target.value })}
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <textarea
+                      required
+                      placeholder="Inbound message / inquiry details..."
+                      value={form.message}
+                      onChange={(e) => setForm({ ...form, message: e.target.value })}
+                      rows={4}
+                      className="resize-none rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="mt-1 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                    >
+                      {submitting ? "Qualifying..." : "Qualify lead"}
+                    </button>
+                    {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                  </form>
+                </div>
+
+                {lastResult && (
+                  <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                        Latest qualification
+                      </h2>
+                      <StatusBadge status={lastResult.qualification.status} />
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      {lastResult.lead.name} · score {lastResult.qualification.overall_score}/100
+                    </p>
+                    <div className="mt-4">
+                      <BantBreakdown bant={lastResult.qualification} />
+                    </div>
+                    <p className="mt-4 text-sm text-zinc-600 dark:text-zinc-400">
+                      {lastResult.qualification.summary}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {activeTab === "discover" && (
+              <>
+                <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950">
+                  <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                    Discover businesses
+                  </h2>
+                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                    Search local businesses by industry and location, and import new
+                    matches into the pipeline as leads.
+                  </p>
+                  <form onSubmit={handleProspect} className="mt-4 flex flex-col gap-3">
+                    <input
+                      required
+                      placeholder="Industry (e.g. dentists)"
+                      value={prospectForm.industry}
+                      onChange={(e) =>
+                        setProspectForm({ ...prospectForm, industry: e.target.value })
+                      }
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <input
+                      required
+                      placeholder="Location (e.g. Austin, TX)"
+                      value={prospectForm.location}
+                      onChange={(e) =>
+                        setProspectForm({ ...prospectForm, location: e.target.value })
+                      }
+                      className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={prospecting}
+                      className="mt-1 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                    >
+                      {prospecting ? "Searching..." : "Search & import"}
+                    </button>
+                    {prospectError && (
+                      <p className="text-sm text-red-600 dark:text-red-400">{prospectError}</p>
+                    )}
+                  </form>
+                </div>
+
+                {prospectResult && (
+                  <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950">
+                    <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                      Search results
+                    </h2>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      Found {prospectResult.found} · Imported {prospectResult.imported.length}{" "}
+                      · Already in pipeline {prospectResult.skipped}
+                    </p>
+                    {prospectResult.imported.length > 0 && (
+                      <ul className="mt-4 flex flex-col gap-2">
+                        {prospectResult.imported.map((lead) => (
+                          <li
+                            key={lead.id}
+                            className="flex items-center justify-between text-sm"
+                          >
+                            <span className="text-zinc-900 dark:text-zinc-50">
+                              {lead.name}
+                            </span>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                              {lead.phone ?? "no phone"}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+
+          <section className="lg:col-span-3">
+            <div className="rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+              <div className="flex flex-col gap-2 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                    Pipeline
+                  </h2>
+                  <span className="text-xs text-zinc-400">{leads.length} leads</span>
+                </div>
+                {(() => {
+                  const unscoredCount = leads.filter((l) => l.status === "new").length;
+                  if (unscoredCount === 0) return null;
+                  return (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={qualifyAllUnscored}
+                        disabled={bulkQualifying}
+                        className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
+                      >
+                        {bulkQualifying
+                          ? "Qualifying..."
+                          : `Qualify all unscored (${unscoredCount})`}
+                      </button>
+                      {bulkSummary && !bulkQualifying && (
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {bulkSummary.succeeded} qualified
+                          {bulkSummary.failed > 0 ? `, ${bulkSummary.failed} failed` : ""}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                {leads.length === 0 && (
+                  <li className="px-6 py-8 text-center text-sm text-zinc-400">
+                    No leads yet. Submit a prospect to get started.
+                  </li>
+                )}
+                {leads.map((lead) => {
+                  const bant = lead.metadata?.bant;
+                  const enrichment = lead.metadata?.enrichment as WebEnrichment | undefined;
+                  const isQualifying = qualifyingIds.has(lead.id);
+                  const qualifyError = qualifyErrors[lead.id];
+                  return (
+                    <li key={lead.id} className="flex flex-col gap-3 px-6 py-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                            {lead.name ?? "Unnamed"}
+                          </p>
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            {[lead.company, lead.email].filter(Boolean).join(" · ")}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-3">
+                          <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                            {lead.lead_score}
+                          </span>
+                          <StatusBadge status={lead.status} />
+                        </div>
+                      </div>
+                      {bant && (
+                        <div className="max-w-sm">
+                          <BantBreakdown bant={bant} />
+                        </div>
+                      )}
+                      {enrichment && <EnrichmentSummary enrichment={enrichment} />}
+                      <div className="flex items-center gap-2">
+                        {lead.status === "new" && (
+                          <button
+                            type="button"
+                            onClick={() => qualifyLead(lead.id)}
+                            disabled={isQualifying}
+                            className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
+                          >
+                            {isQualifying ? "Qualifying..." : "Qualify lead"}
+                          </button>
+                        )}
+                        {lead.status === "qualified" && (
+                          <button
+                            type="button"
+                            onClick={() => openOutreach(lead)}
+                            className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
+                          >
+                            Outreach
+                          </button>
+                        )}
+                      </div>
+                      {qualifyError && (
+                        <p className="text-xs text-red-600 dark:text-red-400">{qualifyError}</p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </section>
+        </div>
+      </div>
+      {outreachLead && (
+        <OutreachModal
+          lead={outreachLead}
+          content={outreachContent}
+          loading={outreachLoading}
+          error={outreachError}
+          onClose={closeOutreach}
+        />
+      )}
+    </div>
+  );
+}
