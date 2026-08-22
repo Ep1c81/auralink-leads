@@ -276,6 +276,10 @@ export default function Home() {
     succeeded: number;
     failed: number;
   } | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
 
   const [outreachLead, setOutreachLead] = useState<Lead | null>(null);
   const [outreachContent, setOutreachContent] = useState<OutreachContent | null>(
@@ -421,12 +425,21 @@ export default function Home() {
     let succeeded = 0;
     let failed = 0;
 
-    for (const id of targets) {
-      const ok = await qualifyLead(id);
+    for (let i = 0; i < targets.length; i++) {
+      setBulkProgress({ done: i, total: targets.length });
+
+      const ok = await qualifyLead(targets[i]);
       if (ok) succeeded += 1;
       else failed += 1;
+
+      // Stay comfortably under Gemini's free-tier rate limit (~13 req/min)
+      // by spacing out sequential qualification calls in the batch loop.
+      if (i < targets.length - 1) {
+        await new Promise((r) => setTimeout(r, 4500));
+      }
     }
 
+    setBulkProgress(null);
     setBulkSummary({ succeeded, failed });
     setBulkQualifying(false);
   }
@@ -670,7 +683,9 @@ export default function Home() {
                         className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
                       >
                         {bulkQualifying
-                          ? "Qualifying..."
+                          ? bulkProgress
+                            ? `Qualifying ${bulkProgress.done}/${bulkProgress.total}...`
+                            : "Qualifying..."
                           : `Qualify all unscored (${unscoredCount})`}
                       </button>
                       {bulkSummary && !bulkQualifying && (

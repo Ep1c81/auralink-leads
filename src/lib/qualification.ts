@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { ApiError, GoogleGenAI, Type } from "@google/genai";
 import { supabase } from "@/lib/supabase";
 import { notifyLeadQualified } from "@/lib/notifications";
 import type { BantQualification, Lead, LeadConversation } from "@/lib/types";
@@ -6,6 +6,21 @@ import type { BantQualification, Lead, LeadConversation } from "@/lib/types";
 const GEMINI_MODEL = "gemini-3.6-flash";
 
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// Batch qualification retries a 429 up to 3 times with exponential backoff
+// before giving up and falling back to a heuristic score.
+const RATE_LIMIT_RETRY_DELAYS_MS = [5000, 10000, 20000];
+
+function isRateLimitError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    return err.status === 429;
+  }
+  return err instanceof Error && /RESOURCE_EXHAUSTED|"code":\s*429/.test(err.message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const bantResponseSchema = {
   type: Type.OBJECT,
@@ -136,6 +151,89 @@ export async function runBantQualificationFromProfile(
 }
 
 /**
+ * Deterministic BANT estimate used when Gemini qualification is unavailable
+ * (rate-limited past all retries, or otherwise erroring). Scores lean on
+ * basic profile completeness — name, phone, website, address — rather than
+ * any real assessment, and always comes back "needs_more_info" so it never
+ * masquerades as a real AI qualification.
+ */
+function computeHeuristicQualification(lead: Lead): BantQualification {
+  const metadata = lead.metadata ?? {};
+  const hasName = Boolean(lead.name || lead.company);
+  const hasPhone = Boolean(lead.phone);
+  const hasWebsite =
+    typeof metadata.website === "string" && metadata.website.trim().length > 0;
+  const hasAddress =
+    typeof metadata.address === "string" && metadata.address.trim().length > 0;
+  const signalCount = [hasName, hasPhone, hasWebsite, hasAddress].filter(Boolean).length;
+
+  return {
+    budget: {
+      score: 4,
+      notes: "Gemini qualification was unavailable — budget could not be estimated and defaults to a conservative baseline.",
+    },
+    authority: {
+      score: hasName ? (hasPhone ? 6 : 5) : 3,
+      notes: hasPhone
+        ? "A listed business name and phone number suggest an identifiable, reachable owner/operator."
+        : "Limited contact details on file; authority is a rough estimate, not confirmed.",
+    },
+    need: {
+      score: hasWebsite ? 5 : 6,
+      notes: hasWebsite
+        ? "Business already has a web presence; need is estimated as moderate."
+        : "No website on file; need for a digital presence is plausible but unconfirmed.",
+    },
+    timeline: {
+      score: 2,
+      notes: "No inbound signal available to estimate timeline.",
+    },
+    overall_score: Math.min(100, 20 + signalCount * 10),
+    status: "needs_more_info",
+    summary: `Automatic fallback qualification for ${lead.name ?? lead.company ?? "this lead"}: Gemini qualification was unavailable (rate limit exhausted or request failed), so this score was estimated from basic profile signals (${signalCount}/4 of name, phone, website, and address present). Flagged as needs_more_info pending a real AI qualification pass.`,
+  };
+}
+
+/**
+ * Runs profile-based BANT qualification with retry: on a 429 rate-limit
+ * error, retries up to 3 times with exponential backoff (5s, 10s, 20s)
+ * before giving up. Any other error, or exhausting all retries, falls back
+ * to a heuristic score instead of throwing — batch qualification should
+ * never blow up mid-loop.
+ */
+async function runBantQualificationFromProfileWithFallback(
+  lead: Lead
+): Promise<{ qualification: BantQualification; usedFallback: boolean }> {
+  const maxAttempts = RATE_LIMIT_RETRY_DELAYS_MS.length + 1;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const qualification = await runBantQualificationFromProfile(lead);
+      return { qualification, usedFallback: false };
+    } catch (err) {
+      lastError = err;
+
+      if (!isRateLimitError(err) || attempt === maxAttempts - 1) {
+        break;
+      }
+
+      const delay = RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `[qualification] Rate limited qualifying lead ${lead.id} (attempt ${attempt + 1}/${maxAttempts}); retrying in ${delay}ms`
+      );
+      await sleep(delay);
+    }
+  }
+
+  console.error(
+    `[qualification] Gemini qualification failed for lead ${lead.id}, using heuristic fallback:`,
+    lastError
+  );
+  return { qualification: computeHeuristicQualification(lead), usedFallback: true };
+}
+
+/**
  * Persists a qualification result: updates the lead's status/score/BANT
  * metadata, records a conversation entry, and fires a WhatsApp alert when
  * the lead comes out qualified. Shared by both the message-driven and
@@ -221,11 +319,13 @@ export async function qualifyLeadProfile(lead: Lead): Promise<{
   lead: Lead;
   qualification: BantQualification;
 }> {
-  const qualification = await runBantQualificationFromProfile(lead);
+  const { qualification, usedFallback } = await runBantQualificationFromProfileWithFallback(
+    lead
+  );
   const { lead: updatedLead } = await persistQualification(
     lead,
     qualification,
-    "gemini_qualifier_batch"
+    usedFallback ? "heuristic_fallback" : "gemini_qualifier_batch"
   );
 
   return { lead: updatedLead, qualification };
