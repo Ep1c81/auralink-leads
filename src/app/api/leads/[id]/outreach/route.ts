@@ -34,6 +34,7 @@ export async function POST(
     const result = await generateAndSaveOutreach(lead as Lead);
     return NextResponse.json(result);
   } catch (err) {
+    console.error(`[outreach] request failed for lead ${id}:`, err);
     return NextResponse.json(
       { error: "Outreach generation failed", details: `${err}` },
       { status: 502 }
