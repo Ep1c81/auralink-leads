@@ -51,11 +51,13 @@ const EMPTY_FORM: FormState = {
 interface ProspectFormState {
   industry: string;
   location: string;
+  lowRatingOnly: boolean;
 }
 
 const EMPTY_PROSPECT_FORM: ProspectFormState = {
   industry: "",
   location: "",
+  lowRatingOnly: false,
 };
 
 interface ProspectResult {
@@ -617,6 +619,23 @@ export default function Home() {
                       }
                       className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
                     />
+                    <label className="flex items-start gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={prospectForm.lowRatingOnly}
+                        onChange={(e) =>
+                          setProspectForm({
+                            ...prospectForm,
+                            lowRatingOnly: e.target.checked,
+                          })
+                        }
+                        className="mt-0.5"
+                      />
+                      <span>
+                        Only rating &lt; 4.2 or &lt; 15 reviews (prime targets for review
+                        management &amp; tap standees)
+                      </span>
+                    </label>
                     <button
                       type="submit"
                       disabled={prospecting}
@@ -641,19 +660,28 @@ export default function Home() {
                     </p>
                     {prospectResult.imported.length > 0 && (
                       <ul className="mt-4 flex flex-col gap-2">
-                        {prospectResult.imported.map((lead) => (
-                          <li
-                            key={lead.id}
-                            className="flex items-center justify-between text-sm"
-                          >
-                            <span className="text-zinc-900 dark:text-zinc-50">
-                              {lead.name}
-                            </span>
-                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                              {lead.phone ?? "no phone"}
-                            </span>
-                          </li>
-                        ))}
+                        {prospectResult.imported.map((lead) => {
+                          const rating = lead.metadata?.rating;
+                          const reviewCount = lead.metadata?.user_rating_count;
+                          return (
+                            <li
+                              key={lead.id}
+                              className="flex items-center justify-between text-sm"
+                            >
+                              <span className="text-zinc-900 dark:text-zinc-50">
+                                {lead.name}
+                              </span>
+                              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                                {typeof rating === "number"
+                                  ? `★${rating.toFixed(1)} (${
+                                      typeof reviewCount === "number" ? reviewCount : 0
+                                    })`
+                                  : "no rating"}{" "}
+                                · {lead.phone ?? "no phone"}
+                              </span>
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                   </div>

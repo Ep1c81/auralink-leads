@@ -7,6 +7,20 @@ interface ProspectingPayload {
   industry: string;
   location: string;
   limit?: number;
+  /** Keep only businesses rated under 4.2, or with fewer than 15 reviews
+   *  (missing review data counts as "fewer than 15") — prime targets for
+   *  review management / tap standee outreach. */
+  lowRatingOnly?: boolean;
+}
+
+const LOW_RATING_THRESHOLD = 4.2;
+const LOW_REVIEW_COUNT_THRESHOLD = 15;
+
+function isLowRatingTarget(business: { rating: number | null; userRatingCount: number | null }) {
+  const hasLowRating = business.rating !== null && business.rating < LOW_RATING_THRESHOLD;
+  const hasFewReviews =
+    business.userRatingCount === null || business.userRatingCount < LOW_REVIEW_COUNT_THRESHOLD;
+  return hasLowRating || hasFewReviews;
 }
 
 export async function POST(request: Request) {
@@ -36,6 +50,10 @@ export async function POST(request: Request) {
       { error: "Business discovery failed", details: `${err}` },
       { status: 502 }
     );
+  }
+
+  if (payload.lowRatingOnly) {
+    businesses = businesses.filter(isLowRatingTarget);
   }
 
   if (businesses.length === 0) {
@@ -80,6 +98,7 @@ export async function POST(request: Request) {
           address: b.address,
           website: b.website,
           rating: b.rating,
+          user_rating_count: b.userRatingCount,
           industry: payload.industry,
           location: payload.location,
         },
