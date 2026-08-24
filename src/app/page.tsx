@@ -10,6 +10,8 @@ import type {
 } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5000;
+const QUALIFY_MAX_ATTEMPTS = 2;
+const QUALIFY_RETRY_DELAY_MS = 2000;
 
 const STATUS_STYLES: Record<LeadStatus, string> = {
   new: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -106,23 +108,24 @@ function BantBreakdown({ bant }: { bant: BantQualification }) {
   );
 }
 
-function EnrichmentSummary({ enrichment }: { enrichment: WebEnrichment }) {
-  if (enrichment.error) {
-    return (
-      <p className="text-xs text-zinc-400 dark:text-zinc-600">
-        Website enrichment failed: {enrichment.error}
-      </p>
-    );
-  }
+function ContactDetails({
+  phone,
+  enrichment,
+}: {
+  phone: string | null;
+  enrichment?: WebEnrichment;
+}) {
+  const emails = enrichment?.emails ?? [];
+  const social = enrichment ? Object.entries(enrichment.socialLinks) : [];
 
-  const social = Object.entries(enrichment.socialLinks);
-  if (enrichment.emails.length === 0 && social.length === 0 && !enrichment.description) {
+  if (!phone && emails.length === 0 && social.length === 0 && !enrichment?.error) {
     return null;
   }
 
   return (
     <div className="flex flex-col gap-1 text-xs text-zinc-500 dark:text-zinc-400">
-      {enrichment.emails.length > 0 && <p>✉️ {enrichment.emails.join(", ")}</p>}
+      {phone && <p>📞 {phone}</p>}
+      {emails.length > 0 && <p>✉️ {emails.join(", ")}</p>}
       {social.length > 0 && (
         <p>
           {social.map(([platform, url]) => (
@@ -136,6 +139,11 @@ function EnrichmentSummary({ enrichment }: { enrichment: WebEnrichment }) {
               {platform}
             </a>
           ))}
+        </p>
+      )}
+      {enrichment?.error && (
+        <p className="text-zinc-400 dark:text-zinc-600">
+          Website enrichment failed: {enrichment.error}
         </p>
       )}
     </div>
@@ -273,6 +281,8 @@ export default function Home() {
 
   const [qualifyingIds, setQualifyingIds] = useState<Set<string>>(new Set());
   const [qualifyErrors, setQualifyErrors] = useState<Record<string, string>>({});
+  const [autoQualifyingIds, setAutoQualifyingIds] = useState<Set<string>>(new Set());
+  const [autoQualifyErrors, setAutoQualifyErrors] = useState<Record<string, string>>({});
   const [bulkQualifying, setBulkQualifying] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<{
     succeeded: number;
@@ -315,6 +325,12 @@ export default function Home() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
+    if (!form.name.trim() && !form.phone.trim() && !form.company.trim()) {
+      setError("Provide at least a name, phone, or company");
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
 
@@ -381,7 +397,7 @@ export default function Home() {
     }
   }
 
-  async function qualifyLead(leadId: string): Promise<boolean> {
+  async function qualifyLead(leadId: string, attempt = 1): Promise<boolean> {
     setQualifyingIds((prev) => new Set(prev).add(leadId));
     setQualifyErrors((prev) => {
       const next = { ...prev };
@@ -389,11 +405,28 @@ export default function Home() {
       return next;
     });
 
+    // Transient network errors (dropped connection, upstream 502/504) get
+    // one automatic retry with a short delay before we surface a final
+    // error to the user.
+    const retryTransient = async (): Promise<boolean> => {
+      if (attempt >= QUALIFY_MAX_ATTEMPTS) return false;
+      setQualifyErrors((prev) => ({
+        ...prev,
+        [leadId]: "Network hiccup while qualifying lead — retrying...",
+      }));
+      await new Promise((r) => setTimeout(r, QUALIFY_RETRY_DELAY_MS));
+      return qualifyLead(leadId, attempt + 1);
+    };
+
     try {
       const res = await fetch(`/api/leads/${leadId}/qualify`, { method: "POST" });
       const data = await res.json();
 
       if (!res.ok) {
+        if (res.status === 502 || res.status === 504) {
+          const retried = await retryTransient();
+          if (retried) return true;
+        }
         setQualifyErrors((prev) => ({
           ...prev,
           [leadId]: data.error ?? "Qualification failed",
@@ -404,13 +437,51 @@ export default function Home() {
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
       return true;
     } catch {
+      const retried = await retryTransient();
+      if (retried) return true;
+
       setQualifyErrors((prev) => ({
         ...prev,
-        [leadId]: "Network error while qualifying lead",
+        [leadId]: "Network error while qualifying lead. Please try again.",
       }));
       return false;
     } finally {
       setQualifyingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(leadId);
+        return next;
+      });
+    }
+  }
+
+  async function autoQualifyLead(leadId: string) {
+    setAutoQualifyingIds((prev) => new Set(prev).add(leadId));
+    setAutoQualifyErrors((prev) => {
+      const next = { ...prev };
+      delete next[leadId];
+      return next;
+    });
+
+    try {
+      const res = await fetch(`/api/leads/${leadId}/auto-qualify`, { method: "POST" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setAutoQualifyErrors((prev) => ({
+          ...prev,
+          [leadId]: data.error ?? "Auto-qualify failed",
+        }));
+        return;
+      }
+
+      setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
+    } catch {
+      setAutoQualifyErrors((prev) => ({
+        ...prev,
+        [leadId]: "Network error while auto-qualifying lead",
+      }));
+    } finally {
+      setAutoQualifyingIds((prev) => {
         const next = new Set(prev);
         next.delete(leadId);
         return next;
@@ -523,16 +594,14 @@ export default function Home() {
                   </h2>
                   <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
                     <input
-                      required
                       placeholder="Name"
                       value={form.name}
                       onChange={(e) => setForm({ ...form, name: e.target.value })}
                       className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
                     />
                     <input
-                      required
                       type="email"
-                      placeholder="Email"
+                      placeholder="Email (optional)"
                       value={form.email}
                       onChange={(e) => setForm({ ...form, email: e.target.value })}
                       className="rounded-lg border border-zinc-200 bg-transparent px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
@@ -738,6 +807,8 @@ export default function Home() {
                   const enrichment = lead.metadata?.enrichment as WebEnrichment | undefined;
                   const isQualifying = qualifyingIds.has(lead.id);
                   const qualifyError = qualifyErrors[lead.id];
+                  const isAutoQualifying = autoQualifyingIds.has(lead.id);
+                  const autoQualifyError = autoQualifyErrors[lead.id];
                   return (
                     <li key={lead.id} className="flex flex-col gap-3 px-6 py-4">
                       <div className="flex items-start justify-between gap-4">
@@ -761,7 +832,7 @@ export default function Home() {
                           <BantBreakdown bant={bant} />
                         </div>
                       )}
-                      {enrichment && <EnrichmentSummary enrichment={enrichment} />}
+                      <ContactDetails phone={lead.phone} enrichment={enrichment} />
                       <div className="flex items-center gap-2">
                         {lead.status === "new" && (
                           <button
@@ -782,9 +853,22 @@ export default function Home() {
                             Outreach
                           </button>
                         )}
+                        {lead.status === "needs_more_info" && (
+                          <button
+                            type="button"
+                            onClick={() => autoQualifyLead(lead.id)}
+                            disabled={isAutoQualifying}
+                            className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
+                          >
+                            {isAutoQualifying ? "Auto-Qualifying..." : "Auto-Qualify & Enrich"}
+                          </button>
+                        )}
                       </div>
                       {qualifyError && (
                         <p className="text-xs text-red-600 dark:text-red-400">{qualifyError}</p>
+                      )}
+                      {autoQualifyError && (
+                        <p className="text-xs text-red-600 dark:text-red-400">{autoQualifyError}</p>
                       )}
                     </li>
                   );

@@ -18,8 +18,15 @@ function isRateLimitError(err: unknown): boolean {
   return err instanceof Error && /RESOURCE_EXHAUSTED|"code":\s*429/.test(err.message);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 const bantResponseSchema = {
@@ -94,7 +101,7 @@ ${message}
 For each BANT dimension, give a 0-10 confidence score and short supporting notes based only on evidence in the message. Then give an overall_score (0-100), a status ("qualified", "unqualified", or "needs_more_info"), and a one-paragraph summary explaining the qualification decision.`;
 }
 
-function buildProfilePrompt(lead: Lead): string {
+function buildProfilePrompt(lead: Lead, contextNote?: string): string {
   const metadata = lead.metadata ?? {};
   const industry = typeof metadata.industry === "string" ? metadata.industry : "unknown";
   const location = typeof metadata.location === "string" ? metadata.location : "unknown";
@@ -113,6 +120,7 @@ Business profile:
 - Phone: ${lead.phone ?? "unknown"}
 - Website: ${website}
 - Discovery source: ${source}
+${contextNote ? `\nAdditional targeting context: ${contextNote}` : ""}
 
 Since there is no direct inquiry, base your BANT confidence scores on reasonable, conservative inference for a small local business of this type and size: budget likelihood given the industry, authority (owners/operators of small local businesses typically hold direct purchasing authority), need (would a business like this plausibly benefit from more customers or a better digital presence), and timeline (assume unknown/moderate unless the profile suggests otherwise). Do not invent facts you don't have evidence for.
 
@@ -136,14 +144,17 @@ export async function runBantQualification(
 }
 
 export async function runBantQualificationFromProfile(
-  lead: Lead
+  lead: Lead,
+  contextNote?: string,
+  signal?: AbortSignal
 ): Promise<BantQualification> {
   const response = await genAI.models.generateContent({
     model: GEMINI_MODEL,
-    contents: buildProfilePrompt(lead),
+    contents: buildProfilePrompt(lead, contextNote),
     config: {
       responseMimeType: "application/json",
       responseSchema: bantResponseSchema,
+      abortSignal: signal,
     },
   });
 
@@ -197,19 +208,27 @@ function computeHeuristicQualification(lead: Lead): BantQualification {
 /**
  * Runs profile-based BANT qualification with retry: on a 429 rate-limit
  * error, retries up to 3 times with exponential backoff (5s, 10s, 20s)
- * before giving up. Any other error, or exhausting all retries, falls back
- * to a heuristic score instead of throwing — batch qualification should
- * never blow up mid-loop.
+ * before giving up. Any other error — including a network failure or a
+ * timeout on `signal` — or exhausting all retries, falls back to a
+ * heuristic score instead of throwing — batch qualification should never
+ * blow up mid-loop.
  */
-async function runBantQualificationFromProfileWithFallback(
-  lead: Lead
+export async function runBantQualificationFromProfileWithFallback(
+  lead: Lead,
+  contextNote?: string,
+  signal?: AbortSignal
 ): Promise<{ qualification: BantQualification; usedFallback: boolean }> {
   const maxAttempts = RATE_LIMIT_RETRY_DELAYS_MS.length + 1;
   let lastError: unknown;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      lastError = signal.reason ?? new Error("Qualification aborted");
+      break;
+    }
+
     try {
-      const qualification = await runBantQualificationFromProfile(lead);
+      const qualification = await runBantQualificationFromProfile(lead, contextNote, signal);
       return { qualification, usedFallback: false };
     } catch (err) {
       lastError = err;
@@ -222,12 +241,12 @@ async function runBantQualificationFromProfileWithFallback(
       console.warn(
         `[qualification] Rate limited qualifying lead ${lead.id} (attempt ${attempt + 1}/${maxAttempts}); retrying in ${delay}ms`
       );
-      await sleep(delay);
+      await sleep(delay, signal);
     }
   }
 
   console.error(
-    `[qualification] Gemini qualification failed for lead ${lead.id}, using heuristic fallback:`,
+    `[qualification] Gemini qualification failed or timed out for lead ${lead.id}, using heuristic fallback:`,
     lastError
   );
   return { qualification: computeHeuristicQualification(lead), usedFallback: true };
@@ -315,17 +334,43 @@ export async function qualifyAndRecord(
  * profile (no inbound message required) and persists the result. Used by
  * the pipeline's per-lead "Qualify Lead" and "Qualify All Unscored" actions.
  */
-export async function qualifyLeadProfile(lead: Lead): Promise<{
+export async function qualifyLeadProfile(
+  lead: Lead,
+  contextNote?: string,
+  signal?: AbortSignal
+): Promise<{
   lead: Lead;
   qualification: BantQualification;
 }> {
   const { qualification, usedFallback } = await runBantQualificationFromProfileWithFallback(
-    lead
+    lead,
+    contextNote,
+    signal
   );
   const { lead: updatedLead } = await persistQualification(
     lead,
     qualification,
     usedFallback ? "heuristic_fallback" : "gemini_qualifier_batch"
+  );
+
+  return { lead: updatedLead, qualification };
+}
+
+/**
+ * Computes and persists a heuristic-only BANT estimate, bypassing Gemini
+ * entirely. Used by callers that enforce their own hard deadline (e.g. an
+ * API route's timeout controller) when the Gemini-backed qualification flow
+ * in qualifyLeadProfile doesn't resolve in time.
+ */
+export async function qualifyLeadProfileHeuristic(lead: Lead): Promise<{
+  lead: Lead;
+  qualification: BantQualification;
+}> {
+  const qualification = computeHeuristicQualification(lead);
+  const { lead: updatedLead } = await persistQualification(
+    lead,
+    qualification,
+    "heuristic_fallback_timeout"
   );
 
   return { lead: updatedLead, qualification };

@@ -1,6 +1,7 @@
+import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { qualifyAndRecord } from "@/lib/qualification";
+import { qualifyLeadProfile } from "@/lib/qualification";
 import type { Lead } from "@/lib/types";
 
 interface QualifyPayload {
@@ -41,18 +42,29 @@ export async function POST(request: Request) {
     }
     lead = data as Lead;
   } else {
-    if (!payload.email) {
+    if (!payload.name && !payload.phone && !payload.company && !payload.email) {
       return NextResponse.json(
-        { error: "`lead_id` or `email` is required" },
+        {
+          error:
+            "`lead_id`, or at least one of `name`, `phone`, `company`, `email` is required",
+        },
         { status: 400 }
       );
     }
 
-    const { data: existing } = await supabase
-      .from("leads")
-      .select("*")
-      .eq("email", payload.email)
-      .maybeSingle();
+    // Email is optional on the intake form; fall back to a generated
+    // placeholder so leads without an email can still be identified/stored.
+    const email = payload.email || `no-email+${randomUUID()}@placeholder.local`;
+
+    const existing = payload.email
+      ? (
+          await supabase
+            .from("leads")
+            .select("*")
+            .eq("email", payload.email)
+            .maybeSingle()
+        ).data
+      : null;
 
     if (existing) {
       lead = existing as Lead;
@@ -61,7 +73,7 @@ export async function POST(request: Request) {
         .from("leads")
         .insert({
           name: payload.name,
-          email: payload.email,
+          email,
           phone: payload.phone,
           company: payload.company,
           status: "new",
@@ -79,12 +91,14 @@ export async function POST(request: Request) {
     }
   }
 
+  // Uses profile-based qualification with retry + heuristic fallback so a
+  // manual prospect submission never fails outright on a Gemini error.
   try {
-    const result = await qualifyAndRecord(lead, payload.message);
+    const result = await qualifyLeadProfile(lead);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(
-      { error: "Gemini qualification failed", details: `${err}` },
+      { error: "Lead qualification failed", details: `${err}` },
       { status: 502 }
     );
   }
