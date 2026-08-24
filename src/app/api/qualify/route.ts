@@ -1,8 +1,14 @@
 import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { qualifyLeadProfile } from "@/lib/qualification";
+import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
+import { withDeadline } from "@/lib/timeout";
 import type { Lead } from "@/lib/types";
+
+// Bounds the Gemini call. Left with ~1s of headroom under the 5s response
+// guarantee for the instant heuristic fallback below, which does no
+// Gemini/network calls and only a couple of fast Supabase round trips.
+const PIPELINE_DEADLINE_MS = 4000;
 
 interface QualifyPayload {
   lead_id?: string;
@@ -91,15 +97,30 @@ export async function POST(request: Request) {
     }
   }
 
-  // Uses profile-based qualification with retry + heuristic fallback so a
-  // manual prospect submission never fails outright on a Gemini error.
+  // Uses profile-based qualification with retry + heuristic fallback, bounded
+  // by a hard deadline, so a manual prospect submission never fails outright
+  // or hangs on a slow/erroring Gemini call — this always answers well
+  // within the 5s the frontend expects.
+  let result: Awaited<ReturnType<typeof qualifyLeadProfile>>;
   try {
-    const result = await qualifyLeadProfile(lead);
-    return NextResponse.json(result);
-  } catch (err) {
-    return NextResponse.json(
-      { error: "Lead qualification failed", details: `${err}` },
-      { status: 502 }
+    result = await withDeadline(
+      (signal) => qualifyLeadProfile(lead, undefined, signal),
+      PIPELINE_DEADLINE_MS
     );
+  } catch (err) {
+    console.error(
+      `[qualify] qualification failed or timed out for lead ${lead.id}, falling back to instant heuristic scoring:`,
+      err
+    );
+    try {
+      result = await qualifyLeadProfileHeuristic(lead);
+    } catch (fallbackErr) {
+      return NextResponse.json(
+        { error: "Lead qualification failed", details: `${fallbackErr}` },
+        { status: 502 }
+      );
+    }
   }
+
+  return NextResponse.json(result);
 }

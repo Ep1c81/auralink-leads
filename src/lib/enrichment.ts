@@ -1,7 +1,10 @@
 import { supabase } from "@/lib/supabase";
 import type { Lead, WebEnrichment } from "@/lib/types";
 
-const FETCH_TIMEOUT_MS = 8000;
+// Kept strict: this runs inline in the qualify request path, which has its
+// own ~4s end-to-end budget, so a slow/unresponsive site must bail out well
+// before it could blow that deadline.
+const FETCH_TIMEOUT_MS = 3000;
 const MAX_HTML_CHARS = 500_000;
 const USER_AGENT = "prospect-lead-engine/1.0 (lead enrichment)";
 
