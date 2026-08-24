@@ -2,13 +2,19 @@ import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
+import { enrichAndSaveLead } from "@/lib/enrichment";
+import { generateAndSaveOutreach } from "@/lib/outreach";
 import { withDeadline } from "@/lib/timeout";
-import type { Lead } from "@/lib/types";
+import type { Lead, OutreachContent } from "@/lib/types";
 
 // Bounds the Gemini call. Left with ~1s of headroom under the 5s response
 // guarantee for the instant heuristic fallback below, which does no
 // Gemini/network calls and only a couple of fast Supabase round trips.
 const PIPELINE_DEADLINE_MS = 4000;
+
+const DEFAULT_CITY = "Santa Ana, CR";
+const DEFAULT_CONTEXT_PROMPT =
+  "Local business target for Google review acceleration, physical NFC tap standees, and automated WhatsApp patient/customer booking.";
 
 interface QualifyPayload {
   lead_id?: string;
@@ -16,7 +22,21 @@ interface QualifyPayload {
   email?: string;
   phone?: string;
   company?: string;
-  message: string;
+  message?: string;
+  // When true, applies the default high-value targeting context to the BANT
+  // prompt and, on a "qualified" result, also generates outreach copy —
+  // this is the single shared engine behind both the pipeline's "Qualify
+  // lead" and "Auto-Qualify & Enrich" actions.
+  auto_qualify?: boolean;
+}
+
+function buildAutoQualifyContextNote(lead: Lead): string {
+  const category =
+    typeof lead.metadata?.industry === "string" && lead.metadata.industry.trim()
+      ? lead.metadata.industry
+      : "local business";
+
+  return `Business name: ${lead.name ?? lead.company ?? "unknown"}. Category: ${category}. City: ${DEFAULT_CITY}. ${DEFAULT_CONTEXT_PROMPT}`;
 }
 
 export async function POST(request: Request) {
@@ -25,13 +45,6 @@ export async function POST(request: Request) {
     payload = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  if (!payload.message || typeof payload.message !== "string") {
-    return NextResponse.json(
-      { error: "`message` is required to qualify a lead" },
-      { status: 400 }
-    );
   }
 
   let lead: Lead;
@@ -58,9 +71,11 @@ export async function POST(request: Request) {
       );
     }
 
-    // Email is optional on the intake form; fall back to a generated
-    // placeholder so leads without an email can still be identified/stored.
-    const email = payload.email || `no-email+${randomUUID()}@placeholder.local`;
+    // Email is optional on the intake form (and never sent by the pipeline's
+    // qualify/auto-qualify actions); fall back to a placeholder so leads
+    // without one can still be created without tripping Supabase's `email`
+    // NOT NULL / schema validation.
+    const email = payload.email || "no-email@placeholder.local";
 
     const existing = payload.email
       ? (
@@ -97,14 +112,16 @@ export async function POST(request: Request) {
     }
   }
 
+  const contextNote = payload.auto_qualify ? buildAutoQualifyContextNote(lead) : undefined;
+
   // Uses profile-based qualification with retry + heuristic fallback, bounded
-  // by a hard deadline, so a manual prospect submission never fails outright
-  // or hangs on a slow/erroring Gemini call — this always answers well
-  // within the 5s the frontend expects.
+  // by a hard deadline, so a qualify request never fails outright or hangs
+  // on a slow/erroring Gemini call — this always answers well within the 5s
+  // the frontend expects.
   let result: Awaited<ReturnType<typeof qualifyLeadProfile>>;
   try {
     result = await withDeadline(
-      (signal) => qualifyLeadProfile(lead, undefined, signal),
+      (signal) => qualifyLeadProfile(lead, contextNote, signal),
       PIPELINE_DEADLINE_MS
     );
   } catch (err) {
@@ -122,5 +139,33 @@ export async function POST(request: Request) {
     }
   }
 
-  return NextResponse.json(result);
+  let finalLead = result.lead;
+  let outreach: OutreachContent | null = null;
+
+  if (result.qualification.status === "qualified") {
+    try {
+      const enriched = await enrichAndSaveLead(finalLead);
+      if (enriched) {
+        finalLead = enriched;
+      }
+    } catch (err) {
+      console.error(`[qualify] enrichment threw for lead ${lead.id}:`, err);
+    }
+
+    if (payload.auto_qualify) {
+      try {
+        const outreachResult = await generateAndSaveOutreach(finalLead);
+        finalLead = outreachResult.lead;
+        outreach = outreachResult.outreach;
+      } catch (err) {
+        console.error(`[qualify] outreach generation threw for lead ${lead.id}:`, err);
+      }
+    }
+  }
+
+  return NextResponse.json({
+    lead: finalLead,
+    qualification: result.qualification,
+    outreach,
+  });
 }

@@ -12,6 +12,7 @@ import type {
 const POLL_INTERVAL_MS = 5000;
 const QUALIFY_MAX_ATTEMPTS = 2;
 const QUALIFY_RETRY_DELAY_MS = 2000;
+const FALLBACK_LEAD_EMAIL = "no-email@placeholder.local";
 
 const STATUS_STYLES: Record<LeadStatus, string> = {
   new: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -150,6 +151,18 @@ function ContactDetails({
   );
 }
 
+// Costa Rica is the default target market for this pipeline's Spanish
+// outreach copy — local numbers are stored without a country code, so an
+// 8-digit national number needs "506" prepended for a valid wa.me link.
+const CR_COUNTRY_CODE = "506";
+
+function buildWhatsAppLink(phone: string, text: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const withCountryCode =
+    digits.length <= 8 ? `${CR_COUNTRY_CODE}${digits}` : digits;
+  return `https://wa.me/${withCountryCode}?text=${encodeURIComponent(text)}`;
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -235,6 +248,20 @@ function OutreachModal({
               <p className="mt-2 whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 text-sm text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
                 {content.whatsapp_pitch}
               </p>
+              {lead.phone ? (
+                <a
+                  href={buildWhatsAppLink(lead.phone, content.whatsapp_pitch)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-500"
+                >
+                  Open in WhatsApp Web
+                </a>
+              ) : (
+                <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-600">
+                  No phone on file — can&apos;t open WhatsApp Web directly.
+                </p>
+              )}
             </div>
 
             <div>
@@ -418,11 +445,29 @@ export default function Home() {
       return qualifyLead(leadId, attempt + 1);
     };
 
+    // Every qualification action — plain "Qualify lead" and "Auto-Qualify &
+    // Enrich" alike — goes through the same /api/qualify endpoint, which
+    // runs the shared runBantQualificationFromProfileWithFallback() engine.
+    const lead = leads.find((l) => l.id === leadId);
+
     try {
-      const res = await fetch(`/api/leads/${leadId}/qualify`, { method: "POST" });
+      const res = await fetch("/api/qualify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lead_id: leadId,
+          // Guard against a null/missing email tripping Supabase schema
+          // validation on the backend's lookup/insert path.
+          email: lead?.email || FALLBACK_LEAD_EMAIL,
+        }),
+      });
       const data = await res.json();
 
       if (!res.ok) {
+        console.error(
+          `[qualify] request failed for lead ${leadId} with status ${res.status}`,
+          data
+        );
         if (res.status === 502 || res.status === 504) {
           const retried = await retryTransient();
           if (retried) return true;
@@ -436,7 +481,8 @@ export default function Home() {
 
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
       return true;
-    } catch {
+    } catch (err) {
+      console.error(`[qualify] fetch threw for lead ${leadId}:`, err);
       const retried = await retryTransient();
       if (retried) return true;
 
@@ -454,7 +500,7 @@ export default function Home() {
     }
   }
 
-  async function autoQualifyLead(leadId: string) {
+  async function autoQualifyLead(leadId: string, attempt = 1): Promise<boolean> {
     setAutoQualifyingIds((prev) => new Set(prev).add(leadId));
     setAutoQualifyErrors((prev) => {
       const next = { ...prev };
@@ -462,24 +508,62 @@ export default function Home() {
       return next;
     });
 
+    // Same transient-error auto-retry as qualifyLead above.
+    const retryTransient = async (): Promise<boolean> => {
+      if (attempt >= QUALIFY_MAX_ATTEMPTS) return false;
+      setAutoQualifyErrors((prev) => ({
+        ...prev,
+        [leadId]: "Network hiccup while auto-qualifying lead — retrying...",
+      }));
+      await new Promise((r) => setTimeout(r, QUALIFY_RETRY_DELAY_MS));
+      return autoQualifyLead(leadId, attempt + 1);
+    };
+
+    // Auto-Qualify & Enrich hits the same /api/qualify engine as plain
+    // qualify, with auto_qualify:true opting into the default targeting
+    // context, enrichment, and outreach generation.
+    const lead = leads.find((l) => l.id === leadId);
+
     try {
-      const res = await fetch(`/api/leads/${leadId}/auto-qualify`, { method: "POST" });
+      const res = await fetch("/api/qualify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lead_id: leadId,
+          email: lead?.email || FALLBACK_LEAD_EMAIL,
+          auto_qualify: true,
+        }),
+      });
       const data = await res.json();
 
       if (!res.ok) {
+        console.error(
+          `[qualify] auto-qualify request failed for lead ${leadId} with status ${res.status}`,
+          data
+        );
+        if (res.status === 502 || res.status === 504) {
+          const retried = await retryTransient();
+          if (retried) return true;
+        }
         setAutoQualifyErrors((prev) => ({
           ...prev,
           [leadId]: data.error ?? "Auto-qualify failed",
         }));
-        return;
+        return false;
       }
 
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
-    } catch {
+      return true;
+    } catch (err) {
+      console.error(`[qualify] auto-qualify fetch threw for lead ${leadId}:`, err);
+      const retried = await retryTransient();
+      if (retried) return true;
+
       setAutoQualifyErrors((prev) => ({
         ...prev,
-        [leadId]: "Network error while auto-qualifying lead",
+        [leadId]: "Network error while auto-qualifying lead. Please try again.",
       }));
+      return false;
     } finally {
       setAutoQualifyingIds((prev) => {
         const next = new Set(prev);
@@ -777,13 +861,13 @@ export default function Home() {
                         type="button"
                         onClick={qualifyAllUnscored}
                         disabled={bulkQualifying}
-                        className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600"
+                        className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
                       >
                         {bulkQualifying
                           ? bulkProgress
-                            ? `Qualifying ${bulkProgress.done}/${bulkProgress.total}...`
-                            : "Qualifying..."
-                          : `Qualify all unscored (${unscoredCount})`}
+                            ? `Auto-Qualifying ${bulkProgress.done}/${bulkProgress.total}...`
+                            : "Auto-Qualifying..."
+                          : `Auto-Qualify All New (${unscoredCount})`}
                       </button>
                       {bulkSummary && !bulkQualifying && (
                         <span className="text-xs text-zinc-500 dark:text-zinc-400">
