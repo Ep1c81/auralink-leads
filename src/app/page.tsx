@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   BantQualification,
   Lead,
@@ -13,6 +13,11 @@ const POLL_INTERVAL_MS = 5000;
 const QUALIFY_MAX_ATTEMPTS = 2;
 const QUALIFY_RETRY_DELAY_MS = 2000;
 const FALLBACK_LEAD_EMAIL = "no-email@placeholder.local";
+// Spacing between sequential batch-queue requests. The backend's own
+// PIPELINE_DEADLINE_MS + heuristic fallback (see /api/qualify) is the real
+// safety net against rate limits or gateway drops — this stagger just keeps
+// requests from stacking up back-to-back.
+const BULK_QUALIFY_STAGGER_MS = 1500;
 
 const STATUS_STYLES: Record<LeadStatus, string> = {
   new: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -314,11 +319,17 @@ export default function Home() {
   const [bulkSummary, setBulkSummary] = useState<{
     succeeded: number;
     failed: number;
+    cancelled: number;
   } | null>(null);
   const [bulkProgress, setBulkProgress] = useState<{
     done: number;
     total: number;
   } | null>(null);
+  // Checked between batch-queue iterations to stop the loop early; the
+  // in-flight request is aborted separately via bulkAbortControllerRef so
+  // Cancel takes effect immediately instead of waiting out the current call.
+  const bulkCancelRequestedRef = useRef(false);
+  const bulkAbortControllerRef = useRef<AbortController | null>(null);
 
   const [outreachLead, setOutreachLead] = useState<Lead | null>(null);
   const [outreachContent, setOutreachContent] = useState<OutreachContent | null>(
@@ -424,7 +435,11 @@ export default function Home() {
     }
   }
 
-  async function qualifyLead(leadId: string, attempt = 1): Promise<boolean> {
+  async function qualifyLead(
+    leadId: string,
+    attempt = 1,
+    signal?: AbortSignal
+  ): Promise<boolean> {
     setQualifyingIds((prev) => new Set(prev).add(leadId));
     setQualifyErrors((prev) => {
       const next = { ...prev };
@@ -442,7 +457,7 @@ export default function Home() {
         [leadId]: "Network hiccup while qualifying lead — retrying...",
       }));
       await new Promise((r) => setTimeout(r, QUALIFY_RETRY_DELAY_MS));
-      return qualifyLead(leadId, attempt + 1);
+      return qualifyLead(leadId, attempt + 1, signal);
     };
 
     // Every qualification action — plain "Qualify lead" and "Auto-Qualify &
@@ -460,6 +475,7 @@ export default function Home() {
           // validation on the backend's lookup/insert path.
           email: lead?.email || FALLBACK_LEAD_EMAIL,
         }),
+        signal,
       });
       const data = await res.json();
 
@@ -482,6 +498,12 @@ export default function Home() {
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
       return true;
     } catch (err) {
+      // A user-initiated cancel (batch Cancel button) aborts the in-flight
+      // fetch — that's expected, so skip the retry/error UI for it.
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return false;
+      }
+
       console.error(`[qualify] fetch threw for lead ${leadId}:`, err);
       const retried = await retryTransient();
       if (retried) return true;
@@ -573,31 +595,60 @@ export default function Home() {
     }
   }
 
+  function cancelBulkQualify() {
+    bulkCancelRequestedRef.current = true;
+    bulkAbortControllerRef.current?.abort();
+  }
+
   async function qualifyAllUnscored() {
     const targets = leads.filter((l) => l.status === "new").map((l) => l.id);
     if (targets.length === 0) return;
 
+    bulkCancelRequestedRef.current = false;
     setBulkQualifying(true);
     setBulkSummary(null);
     let succeeded = 0;
     let failed = 0;
+    let cancelledAt: number | null = null;
 
     for (let i = 0; i < targets.length; i++) {
+      if (bulkCancelRequestedRef.current) {
+        cancelledAt = i;
+        break;
+      }
+
+      // "Processing lead i+1 of total" — bulkProgress.done tracks the
+      // 0-indexed item currently in flight, not yet-completed count.
       setBulkProgress({ done: i, total: targets.length });
 
-      const ok = await qualifyLead(targets[i]);
+      const controller = new AbortController();
+      bulkAbortControllerRef.current = controller;
+      const ok = await qualifyLead(targets[i], 1, controller.signal);
+      bulkAbortControllerRef.current = null;
+
+      if (bulkCancelRequestedRef.current) {
+        cancelledAt = i;
+        break;
+      }
+
+      // The per-item update inside qualifyLead already merges the fresh
+      // lead (score, BANT bars, status) into `leads` as soon as this
+      // request resolves, so the pipeline list re-renders live — no
+      // separate refetch needed between batch items.
       if (ok) succeeded += 1;
       else failed += 1;
 
-      // Stay comfortably under Gemini's free-tier rate limit (~13 req/min)
-      // by spacing out sequential qualification calls in the batch loop.
       if (i < targets.length - 1) {
-        await new Promise((r) => setTimeout(r, 4500));
+        await new Promise((r) => setTimeout(r, BULK_QUALIFY_STAGGER_MS));
       }
     }
 
     setBulkProgress(null);
-    setBulkSummary({ succeeded, failed });
+    setBulkSummary({
+      succeeded,
+      failed,
+      cancelled: cancelledAt !== null ? targets.length - cancelledAt : 0,
+    });
     setBulkQualifying(false);
   }
 
@@ -854,25 +905,57 @@ export default function Home() {
                 </div>
                 {(() => {
                   const unscoredCount = leads.filter((l) => l.status === "new").length;
-                  if (unscoredCount === 0) return null;
+                  // Keep the progress/cancel UI mounted for the whole batch run even
+                  // once the last "new" lead flips status mid-loop — only collapse
+                  // the row once there's truly nothing to show.
+                  if (unscoredCount === 0 && !bulkQualifying && !bulkSummary) return null;
+
+                  if (bulkQualifying) {
+                    const pct = bulkProgress
+                      ? Math.round((bulkProgress.done / bulkProgress.total) * 100)
+                      : 0;
+                    return (
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          {bulkProgress
+                            ? `Processing lead ${bulkProgress.done + 1} of ${bulkProgress.total}...`
+                            : "Starting..."}
+                        </span>
+                        <div className="h-1.5 w-24 shrink-0 rounded-full bg-zinc-200 dark:bg-zinc-800">
+                          <div
+                            className="h-1.5 rounded-full bg-zinc-900 dark:bg-zinc-100"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={cancelBulkQualify}
+                          className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:border-red-400 dark:border-red-900 dark:text-red-400 dark:hover:border-red-700"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={qualifyAllUnscored}
-                        disabled={bulkQualifying}
-                        className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                      >
-                        {bulkQualifying
-                          ? bulkProgress
-                            ? `Auto-Qualifying ${bulkProgress.done}/${bulkProgress.total}...`
-                            : "Auto-Qualifying..."
-                          : `Auto-Qualify All New (${unscoredCount})`}
-                      </button>
-                      {bulkSummary && !bulkQualifying && (
+                      {unscoredCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={qualifyAllUnscored}
+                          className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                        >
+                          {`Auto-Qualify All New (${unscoredCount})`}
+                        </button>
+                      )}
+                      {bulkSummary && (
                         <span className="text-xs text-zinc-500 dark:text-zinc-400">
                           {bulkSummary.succeeded} qualified
                           {bulkSummary.failed > 0 ? `, ${bulkSummary.failed} failed` : ""}
+                          {bulkSummary.cancelled > 0
+                            ? `, ${bulkSummary.cancelled} cancelled`
+                            : ""}
                         </span>
                       )}
                     </div>
