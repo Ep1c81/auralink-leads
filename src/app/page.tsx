@@ -18,6 +18,10 @@ const FALLBACK_LEAD_EMAIL = "no-email@placeholder.local";
 // safety net against rate limits or gateway drops — this stagger just keeps
 // requests from stacking up back-to-back.
 const BULK_QUALIFY_STAGGER_MS = 1500;
+// Gap between full Auto-Pilot sweeps once one finishes. /api/cron/auto-prospect
+// already staggers its own per-lead qualify/outreach calls internally, so
+// this just paces how often the dashboard re-triggers the whole sweep.
+const AUTO_PILOT_SWEEP_INTERVAL_MS = 60_000;
 
 const STATUS_STYLES: Record<LeadStatus, string> = {
   new: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -190,6 +194,63 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+interface AutoPilotRunSummary {
+  at: string;
+  imported: number;
+  qualified: number;
+}
+
+function AutoPilotToggle({
+  enabled,
+  running,
+  onToggle,
+  lastRun,
+  error,
+}: {
+  enabled: boolean;
+  running: boolean;
+  onToggle: () => void;
+  lastRun: AutoPilotRunSummary | null;
+  error: string | null;
+}) {
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={onToggle}
+        className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+          enabled
+            ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
+            : "border-zinc-200 text-zinc-500 hover:border-zinc-400 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-600"
+        }`}
+      >
+        <span
+          className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
+            enabled ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-700"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
+              enabled ? "translate-x-3" : "translate-x-0"
+            }`}
+          />
+        </span>
+        Run Background Auto-Pilot
+        {running && <span className="font-normal opacity-70">(sweeping...)</span>}
+      </button>
+      {lastRun && !error && (
+        <span className="text-[11px] text-zinc-400">
+          Last sweep {new Date(lastRun.at).toLocaleTimeString()}: {lastRun.imported} imported,{" "}
+          {lastRun.qualified} qualified
+        </span>
+      )}
+      {error && <span className="text-[11px] text-red-500 dark:text-red-400">{error}</span>}
+    </div>
+  );
+}
+
 function OutreachModal({
   lead,
   content,
@@ -338,6 +399,13 @@ export default function Home() {
   const [outreachLoading, setOutreachLoading] = useState(false);
   const [outreachError, setOutreachError] = useState<string | null>(null);
 
+  const [autoPilotEnabled, setAutoPilotEnabled] = useState(false);
+  const [autoPilotRunning, setAutoPilotRunning] = useState(false);
+  const [autoPilotLastRun, setAutoPilotLastRun] = useState<AutoPilotRunSummary | null>(
+    null
+  );
+  const [autoPilotError, setAutoPilotError] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -360,6 +428,69 @@ export default function Home() {
       clearInterval(interval);
     };
   }, []);
+
+  // Drives the "Run Background Auto-Pilot" toggle: while enabled, repeatedly
+  // triggers a full /api/cron/auto-prospect sweep (discover -> import ->
+  // qualify -> pre-generate outreach), waiting AUTO_PILOT_SWEEP_INTERVAL_MS
+  // between completed sweeps so it processes new leads continuously without
+  // hammering the discovery/Gemini APIs back-to-back.
+  useEffect(() => {
+    if (!autoPilotEnabled) return;
+
+    let cancelled = false;
+
+    const runLoop = async () => {
+      while (!cancelled) {
+        setAutoPilotRunning(true);
+        setAutoPilotError(null);
+
+        try {
+          const res = await fetch("/api/cron/auto-prospect", { method: "POST" });
+          const data = await res.json();
+
+          if (cancelled) return;
+
+          if (!res.ok) {
+            setAutoPilotError(data.error ?? "Auto-Pilot sweep failed");
+          } else {
+            const results = (data.results ?? []) as Array<{
+              imported: number;
+              qualified: number;
+            }>;
+            const totals = results.reduce(
+              (acc, r) => ({
+                imported: acc.imported + r.imported,
+                qualified: acc.qualified + r.qualified,
+              }),
+              { imported: 0, qualified: 0 }
+            );
+            setAutoPilotLastRun({ at: new Date().toISOString(), ...totals });
+
+            // Pull the fresh leads in immediately so newly imported/qualified
+            // businesses show up without waiting on the next poll tick.
+            const leadsRes = await fetch("/api/leads");
+            if (leadsRes.ok && !cancelled) {
+              const leadsData = await leadsRes.json();
+              setLeads(leadsData.leads ?? []);
+            }
+          }
+        } catch {
+          if (!cancelled) setAutoPilotError("Network error during Auto-Pilot sweep");
+        } finally {
+          if (!cancelled) setAutoPilotRunning(false);
+        }
+
+        if (cancelled) return;
+        await new Promise((r) => setTimeout(r, AUTO_PILOT_SWEEP_INTERVAL_MS));
+      }
+    };
+
+    runLoop();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoPilotEnabled]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -685,13 +816,22 @@ export default function Home() {
   return (
     <div className="flex-1 bg-zinc-50 dark:bg-black">
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-12">
-        <header>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Prospect Lead Engine
-          </h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            Submit a prospect, get an instant AI BANT qualification, and track the pipeline.
-          </p>
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+              Prospect Lead Engine
+            </h1>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              Submit a prospect, get an instant AI BANT qualification, and track the pipeline.
+            </p>
+          </div>
+          <AutoPilotToggle
+            enabled={autoPilotEnabled}
+            running={autoPilotRunning}
+            onToggle={() => setAutoPilotEnabled((v) => !v)}
+            lastRun={autoPilotLastRun}
+            error={autoPilotError}
+          />
         </header>
 
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">

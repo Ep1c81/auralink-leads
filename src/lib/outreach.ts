@@ -45,10 +45,13 @@ function stripMarkdownFence(text: string): string {
  * outreach modal always has clean, presentable content to show. Kept
  * fully in Spanish — OUTREACH_OFFERING_DESCRIPTION is written in English
  * for the Gemini prompt, so it is deliberately not spliced in here.
+ * `offeringEsOverride` lets a caller (e.g. the auto-prospect sweep) swap in
+ * campaign-specific Spanish copy instead of the generic default.
  */
-function buildFallbackOutreach(lead: Lead): OutreachContent {
+function buildFallbackOutreach(lead: Lead, offeringEsOverride?: string): OutreachContent {
   const businessName = lead.name ?? lead.company ?? "su negocio";
   const offeringEs =
+    offeringEsOverride ??
     "crecer con herramientas de contacto por WhatsApp y mayor visibilidad en línea";
 
   return {
@@ -58,12 +61,13 @@ function buildFallbackOutreach(lead: Lead): OutreachContent {
   };
 }
 
-function buildOutreachPrompt(lead: Lead): string {
+function buildOutreachPrompt(lead: Lead, offeringOverride?: string): string {
   const metadata = lead.metadata ?? {};
   const industry = typeof metadata.industry === "string" ? metadata.industry : "negocio local";
   const bant = metadata.bant as BantQualification | undefined;
   const enrichment = metadata.enrichment as WebEnrichment | undefined;
-  const offering = process.env.OUTREACH_OFFERING_DESCRIPTION || DEFAULT_OFFERING;
+  const offering =
+    offeringOverride || process.env.OUTREACH_OFFERING_DESCRIPTION || DEFAULT_OFFERING;
 
   const bantSummary = bant
     ? `BANT qualification summary: ${bant.summary} (overall score ${bant.overall_score}/100 — budget ${bant.budget.score}/10, authority ${bant.authority.score}/10, need ${bant.need.score}/10, timeline ${bant.timeline.score}/10)`
@@ -91,16 +95,28 @@ Write in Spanish (Costa Rican tone — friendly but professional, using "usted")
 Do not invent specific facts about the business you don't have (e.g. don't claim to know their revenue or exact problems) — keep it relevant to their industry but general otherwise.`;
 }
 
+export interface OutreachOfferingOptions {
+  /** English offering description spliced into the Gemini prompt, overriding
+   *  OUTREACH_OFFERING_DESCRIPTION / DEFAULT_OFFERING for this call only. */
+  offering?: string;
+  /** Spanish offering phrase used in the deterministic fallback copy if
+   *  Gemini generation fails, overriding the generic default for this call. */
+  fallbackOfferingEs?: string;
+}
+
 /**
  * Generates outreach copy via Gemini. Never throws — a failed API call,
  * rate limit, or malformed response falls back to buildFallbackOutreach so
  * callers (and the outreach modal) always get clean, renderable content.
  */
-export async function generateOutreach(lead: Lead): Promise<OutreachContent> {
+export async function generateOutreach(
+  lead: Lead,
+  options?: OutreachOfferingOptions
+): Promise<OutreachContent> {
   try {
     const response = await genAI.models.generateContent({
       model: GEMINI_MODEL,
-      contents: buildOutreachPrompt(lead),
+      contents: buildOutreachPrompt(lead, options?.offering),
       config: {
         responseMimeType: "application/json",
         responseSchema: outreachResponseSchema,
@@ -120,7 +136,7 @@ export async function generateOutreach(lead: Lead): Promise<OutreachContent> {
       `[outreach] Gemini generation failed for lead ${lead.id}, using fallback:`,
       err
     );
-    return buildFallbackOutreach(lead);
+    return buildFallbackOutreach(lead, options?.fallbackOfferingEs);
   }
 }
 
@@ -129,9 +145,10 @@ export async function generateOutreach(lead: Lead): Promise<OutreachContent> {
  * qualified lead and persists it into metadata.outreach for reference.
  */
 export async function generateAndSaveOutreach(
-  lead: Lead
+  lead: Lead,
+  options?: OutreachOfferingOptions
 ): Promise<{ lead: Lead; outreach: OutreachContent }> {
-  const outreach = await generateOutreach(lead);
+  const outreach = await generateOutreach(lead, options);
 
   const { data: updatedLead, error } = await supabase
     .from("leads")

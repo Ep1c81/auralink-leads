@@ -1,3 +1,6 @@
+import { supabase } from "@/lib/supabase";
+import type { Lead } from "@/lib/types";
+
 export interface DiscoveredBusiness {
   placeId: string;
   name: string;
@@ -388,4 +391,80 @@ async function searchBusinessesNominatim(
     userRatingCount: null,
     source: "osm" as const,
   }));
+}
+
+// Shared by /api/prospecting and /api/cron/auto-prospect so both manual and
+// automated discovery apply the exact same "prime tap-standee target"
+// definition.
+export const LOW_RATING_THRESHOLD = 4.2;
+export const LOW_REVIEW_COUNT_THRESHOLD = 15;
+
+/** Rated under 4.2, or with fewer than 15 reviews (missing review data counts
+ *  as "fewer than 15") — prime targets for review management / tap standee
+ *  outreach. */
+export function isLowRatingTarget(business: {
+  rating: number | null;
+  userRatingCount: number | null;
+}): boolean {
+  const hasLowRating = business.rating !== null && business.rating < LOW_RATING_THRESHOLD;
+  const hasFewReviews =
+    business.userRatingCount === null || business.userRatingCount < LOW_REVIEW_COUNT_THRESHOLD;
+  return hasLowRating || hasFewReviews;
+}
+
+/**
+ * Dedupes discovered businesses against leads already in the pipeline (by
+ * Google Place ID / OSM ID) and inserts the new ones as "new" leads. Shared
+ * by /api/prospecting and /api/cron/auto-prospect so a business found by
+ * both a manual search and the automated sweep is only ever imported once.
+ */
+export async function importDiscoveredBusinesses(
+  businesses: DiscoveredBusiness[],
+  industry: string,
+  location: string
+): Promise<Lead[]> {
+  if (businesses.length === 0) return [];
+
+  const placeIds = businesses.map((b) => b.placeId);
+  const { data: existingLeads } = await supabase
+    .from("leads")
+    .select("metadata")
+    .in("metadata->>place_id", placeIds);
+
+  const existingPlaceIds = new Set(
+    (existingLeads ?? [])
+      .map((l) => (l.metadata as Record<string, unknown> | null)?.place_id)
+      .filter((id): id is string => typeof id === "string")
+  );
+
+  const newBusinesses = businesses.filter((b) => !existingPlaceIds.has(b.placeId));
+  if (newBusinesses.length === 0) return [];
+
+  const { data: imported, error } = await supabase
+    .from("leads")
+    .insert(
+      newBusinesses.map((b) => ({
+        name: b.name,
+        company: b.name,
+        phone: b.phone,
+        status: "new",
+        metadata: {
+          source: b.source,
+          place_id: b.placeId,
+          address: b.address,
+          website: b.website,
+          rating: b.rating,
+          user_rating_count: b.userRatingCount,
+          industry,
+          location,
+        },
+      }))
+    )
+    .select();
+
+  if (error) {
+    throw new Error(`Failed to import leads: ${error.message}`);
+  }
+
+  return (imported ?? []) as Lead[];
 }

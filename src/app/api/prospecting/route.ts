@@ -1,26 +1,17 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { searchBusinesses } from "@/lib/discovery";
-import type { Lead } from "@/lib/types";
+import {
+  importDiscoveredBusinesses,
+  isLowRatingTarget,
+  searchBusinesses,
+} from "@/lib/discovery";
 
 interface ProspectingPayload {
   industry: string;
   location: string;
   limit?: number;
-  /** Keep only businesses rated under 4.2, or with fewer than 15 reviews
-   *  (missing review data counts as "fewer than 15") — prime targets for
-   *  review management / tap standee outreach. */
+  /** Keep only businesses rated under 4.2, or with fewer than 15 reviews —
+   *  prime targets for review management / tap standee outreach. */
   lowRatingOnly?: boolean;
-}
-
-const LOW_RATING_THRESHOLD = 4.2;
-const LOW_REVIEW_COUNT_THRESHOLD = 15;
-
-function isLowRatingTarget(business: { rating: number | null; userRatingCount: number | null }) {
-  const hasLowRating = business.rating !== null && business.rating < LOW_RATING_THRESHOLD;
-  const hasFewReviews =
-    business.userRatingCount === null || business.userRatingCount < LOW_REVIEW_COUNT_THRESHOLD;
-  return hasLowRating || hasFewReviews;
 }
 
 export async function POST(request: Request) {
@@ -60,53 +51,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ found: 0, imported: [], skipped: 0 });
   }
 
-  const placeIds = businesses.map((b) => b.placeId);
-  const { data: existingLeads } = await supabase
-    .from("leads")
-    .select("metadata")
-    .in("metadata->>place_id", placeIds);
-
-  const existingPlaceIds = new Set(
-    (existingLeads ?? [])
-      .map((l) => (l.metadata as Record<string, unknown> | null)?.place_id)
-      .filter((id): id is string => typeof id === "string")
-  );
-
-  const newBusinesses = businesses.filter(
-    (b) => !existingPlaceIds.has(b.placeId)
-  );
-
-  if (newBusinesses.length === 0) {
-    return NextResponse.json({
-      found: businesses.length,
-      imported: [],
-      skipped: businesses.length,
-    });
-  }
-
-  const { data: imported, error: insertError } = await supabase
-    .from("leads")
-    .insert(
-      newBusinesses.map((b) => ({
-        name: b.name,
-        company: b.name,
-        phone: b.phone,
-        status: "new",
-        metadata: {
-          source: b.source,
-          place_id: b.placeId,
-          address: b.address,
-          website: b.website,
-          rating: b.rating,
-          user_rating_count: b.userRatingCount,
-          industry: payload.industry,
-          location: payload.location,
-        },
-      }))
-    )
-    .select();
-
-  if (insertError) {
+  let imported;
+  try {
+    imported = await importDiscoveredBusinesses(
+      businesses,
+      payload.industry,
+      payload.location
+    );
+  } catch (err) {
+    console.error("[prospecting] import failed:", err);
     return NextResponse.json(
       { error: "Failed to import leads" },
       { status: 500 }
@@ -115,7 +68,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     found: businesses.length,
-    imported: imported as Lead[],
-    skipped: businesses.length - newBusinesses.length,
+    imported,
+    skipped: businesses.length - imported.length,
   });
 }
