@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type {
   BantQualification,
@@ -1159,6 +1160,16 @@ export default function Home() {
                           >
                             Outreach
                           </button>
+                        )}
+                        {lead.status === "qualified" && (
+                          <Link
+                            href={`/outreach?draftLead=${lead.id}&draftLeadName=${encodeURIComponent(
+                              lead.name ?? lead.company ?? "Lead"
+                            )}`}
+                            className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600 dark:focus-visible:outline-zinc-100"
+                          >
+                            Draft outreach email
+                          </Link>
                         )}
                         {lead.status === "needs_more_info" && (
                           <button

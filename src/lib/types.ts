@@ -53,3 +53,49 @@ export interface OutreachContent {
   email_subject: string;
   email_body: string;
 }
+
+export type CampaignStatus = "draft" | "active" | "paused" | "completed";
+
+export type OutreachMessageStatus =
+  | "draft"
+  | "queued"
+  | "sent"
+  | "failed"
+  | "bounced";
+
+export interface OutreachCampaign {
+  id: string;
+  name: string;
+  status: CampaignStatus;
+  created_at: string;
+}
+
+export interface OutreachCampaignWithCounts extends OutreachCampaign {
+  message_count: number;
+  sent_count: number;
+  reply_count: number;
+}
+
+export interface OutreachMessage {
+  id: string;
+  campaign_id: string;
+  lead_id: string;
+  subject: string | null;
+  body: string | null;
+  status: OutreachMessageStatus;
+  sent_at: string | null;
+  provider_message_id: string | null;
+  created_at: string;
+}
+
+export interface OutreachMessageWithLead extends OutreachMessage {
+  lead: Pick<Lead, "id" | "name" | "company" | "email"> | null;
+}
+
+export interface OutreachReply {
+  id: string;
+  message_id: string;
+  raw_content: string | null;
+  received_at: string;
+  classified: boolean;
+}
