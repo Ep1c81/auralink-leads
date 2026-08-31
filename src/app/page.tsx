@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { Toast } from "@/components/Toast";
 import type {
   BantQualification,
+  EnrichmentStatus,
   Lead,
   LeadStatus,
   OutreachContent,
@@ -36,6 +38,18 @@ const STATUS_LABELS: Record<LeadStatus, string> = {
   qualified: "Qualified",
   unqualified: "Unqualified",
   needs_more_info: "Needs Info",
+};
+
+const ENRICHMENT_STYLES: Record<EnrichmentStatus, string> = {
+  pending: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  enriched: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  failed: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+};
+
+const ENRICHMENT_LABELS: Record<EnrichmentStatus, string> = {
+  pending: "Enrichment pending",
+  enriched: "Enriched",
+  failed: "Enrichment failed",
 };
 
 const BANT_DIMENSIONS = [
@@ -91,6 +105,19 @@ function StatusBadge({ status }: { status: LeadStatus }) {
   );
 }
 
+// Only shown once an enrichment attempt has actually happened — "pending" is
+// the default/no-signal state for every lead and isn't worth surfacing.
+function EnrichmentBadge({ status }: { status: EnrichmentStatus }) {
+  if (status === "pending") return null;
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${ENRICHMENT_STYLES[status]}`}
+    >
+      {ENRICHMENT_LABELS[status]}
+    </span>
+  );
+}
+
 function ScoreBar({ label, score }: { label: string; score: number }) {
   const pct = Math.max(0, Math.min(10, score)) * 10;
   return (
@@ -122,14 +149,31 @@ function BantBreakdown({ bant }: { bant: BantQualification }) {
 function ContactDetails({
   phone,
   enrichment,
+  whatsappNumber,
+  instagramUrl,
+  facebookUrl,
 }: {
   phone: string | null;
   enrichment?: WebEnrichment;
+  whatsappNumber?: string | null;
+  instagramUrl?: string | null;
+  facebookUrl?: string | null;
 }) {
   const emails = enrichment?.emails ?? [];
   const social = enrichment ? Object.entries(enrichment.socialLinks) : [];
+  const deepLinks: Array<{ label: string; url: string }> = [
+    whatsappNumber ? { label: "whatsapp", url: `https://wa.me/${whatsappNumber}` } : null,
+    instagramUrl ? { label: "instagram", url: instagramUrl } : null,
+    facebookUrl ? { label: "facebook", url: facebookUrl } : null,
+  ].filter((l): l is { label: string; url: string } => l !== null);
 
-  if (!phone && emails.length === 0 && social.length === 0 && !enrichment?.error) {
+  if (
+    !phone &&
+    emails.length === 0 &&
+    social.length === 0 &&
+    deepLinks.length === 0 &&
+    !enrichment?.error
+  ) {
     return null;
   }
 
@@ -137,8 +181,19 @@ function ContactDetails({
     <div className="flex flex-col gap-1 text-xs text-zinc-500 dark:text-zinc-400">
       {phone && <p>📞 {phone}</p>}
       {emails.length > 0 && <p>✉️ {emails.join(", ")}</p>}
-      {social.length > 0 && (
+      {(social.length > 0 || deepLinks.length > 0) && (
         <p>
+          {deepLinks.map(({ label, url }) => (
+            <a
+              key={label}
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="mr-3 underline decoration-dotted hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              {label}
+            </a>
+          ))}
           {social.map(([platform, url]) => (
             <a
               key={platform}
@@ -359,6 +414,7 @@ export default function Home() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{
     lead: Lead;
     qualification: BantQualification;
@@ -514,6 +570,10 @@ export default function Home() {
       const data = await res.json();
 
       if (!res.ok) {
+        if (res.status === 409 && data.error === "duplicate_prospect") {
+          setToastMessage(data.message ?? "This prospect is already in your pipeline!");
+          return;
+        }
         setError(data.error ?? "Failed to qualify lead");
         return;
       }
@@ -816,6 +876,7 @@ export default function Home() {
 
   return (
     <div className="flex-1 bg-zinc-50 dark:bg-black">
+      <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-12">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -1132,6 +1193,7 @@ export default function Home() {
                           <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
                             {lead.lead_score}
                           </span>
+                          <EnrichmentBadge status={lead.enrichment_status} />
                           <StatusBadge status={lead.status} />
                         </div>
                       </div>
@@ -1140,7 +1202,13 @@ export default function Home() {
                           <BantBreakdown bant={bant} />
                         </div>
                       )}
-                      <ContactDetails phone={lead.phone} enrichment={enrichment} />
+                      <ContactDetails
+                        phone={lead.phone}
+                        enrichment={enrichment}
+                        whatsappNumber={lead.whatsapp_number}
+                        instagramUrl={lead.instagram_url}
+                        facebookUrl={lead.facebook_url}
+                      />
                       <div className="flex items-center gap-2">
                         {lead.status === "new" && (
                           <button

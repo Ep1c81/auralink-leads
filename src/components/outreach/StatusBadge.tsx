@@ -1,13 +1,15 @@
 import type { CampaignStatus, OutreachMessageStatus } from "@/lib/types";
 
 // Single source of truth for every outreach status color + label. Status is
-// always conveyed by this text label, never by color alone.
+// always conveyed by this text label, never by color alone. Text shades are
+// deliberately light (300) against low-opacity fills so contrast stays high
+// against the module's dark canvas regardless of which panel a badge sits on.
 const MESSAGE_STATUS_STYLES: Record<OutreachMessageStatus, string> = {
-  draft: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  queued: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
-  sent: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-  failed: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
-  bounced: "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
+  draft: "bg-slate-500/15 text-slate-300 ring-slate-400/30",
+  queued: "bg-sky-500/15 text-sky-300 ring-sky-400/30",
+  sent: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/30",
+  failed: "bg-red-500/15 text-red-300 ring-red-400/30",
+  bounced: "bg-orange-500/15 text-orange-300 ring-orange-400/30",
 };
 
 const MESSAGE_STATUS_LABELS: Record<OutreachMessageStatus, string> = {
@@ -19,10 +21,10 @@ const MESSAGE_STATUS_LABELS: Record<OutreachMessageStatus, string> = {
 };
 
 const CAMPAIGN_STATUS_STYLES: Record<CampaignStatus, string> = {
-  draft: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-  paused: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-  completed: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  draft: "bg-slate-500/15 text-slate-300 ring-slate-400/30",
+  active: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/30",
+  paused: "bg-amber-500/15 text-amber-300 ring-amber-400/30",
+  completed: "bg-violet-500/15 text-violet-300 ring-violet-400/30",
 };
 
 const CAMPAIGN_STATUS_LABELS: Record<CampaignStatus, string> = {
@@ -41,16 +43,17 @@ export function StatusBadge(props: StatusBadgeProps) {
     props.kind === "message"
       ? MESSAGE_STATUS_STYLES[props.status]
       : CAMPAIGN_STATUS_STYLES[props.status];
-  const label =
+  const text =
     props.kind === "message"
       ? MESSAGE_STATUS_LABELS[props.status]
       : CAMPAIGN_STATUS_LABELS[props.status];
 
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${style}`}
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${style}`}
     >
-      {label}
+      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+      {text}
     </span>
   );
 }

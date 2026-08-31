@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
 import { enrichAndSaveLead } from "@/lib/enrichment";
+import { deepEnrichLead } from "@/lib/deepEnrichment";
 import { generateAndSaveOutreach } from "@/lib/outreach";
 import { withDeadline } from "@/lib/timeout";
 import type { Lead, OutreachContent } from "@/lib/types";
@@ -103,6 +104,20 @@ export async function POST(request: Request) {
         .single();
 
       if (createError || !created) {
+        // 23505 = Postgres unique_violation. The `leads` table has a
+        // composite UNIQUE (name, company) constraint, so a submission that
+        // duplicates an existing prospect lands here rather than as a
+        // generic 500 — the frontend surfaces this specific case as a
+        // friendly toast instead of a crash.
+        if (createError?.code === "23505") {
+          return NextResponse.json(
+            {
+              error: "duplicate_prospect",
+              message: "This prospect is already in your pipeline!",
+            },
+            { status: 409 }
+          );
+        }
         return NextResponse.json(
           { error: "Failed to create lead" },
           { status: 500 }
@@ -153,6 +168,21 @@ export async function POST(request: Request) {
     }
 
     if (payload.auto_qualify) {
+      // "Auto-Qualify & Enrich" additionally runs the deep contact scraper
+      // (homepage + contact-page crawl → instagram_url/facebook_url/
+      // whatsapp_number/email/phone), on top of the lighter metadata-based
+      // enrichAndSaveLead pass above.
+      try {
+        const deepEnriched = await deepEnrichLead(finalLead.id, finalLead.metadata?.website as
+          | string
+          | undefined);
+        if (deepEnriched) {
+          finalLead = deepEnriched;
+        }
+      } catch (err) {
+        console.error(`[qualify] deep enrichment threw for lead ${lead.id}:`, err);
+      }
+
       try {
         const outreachResult = await generateAndSaveOutreach(finalLead);
         finalLead = outreachResult.lead;

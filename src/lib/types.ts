@@ -19,6 +19,8 @@ export interface BantQualification {
   summary: string;
 }
 
+export type EnrichmentStatus = "pending" | "enriched" | "failed";
+
 export interface Lead {
   id: string;
   name: string | null;
@@ -29,6 +31,10 @@ export interface Lead {
   lead_score: number;
   metadata: { bant?: BantQualification; [key: string]: unknown };
   created_at: string;
+  instagram_url: string | null;
+  facebook_url: string | null;
+  whatsapp_number: string | null;
+  enrichment_status: EnrichmentStatus;
 }
 
 export interface LeadConversation {
