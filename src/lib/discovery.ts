@@ -163,6 +163,104 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Naive English de-pluralizer ("dentists" -> "dentist", "bakeries" -> "bakery").
+ *  OSM tag values are always singular, but users type industries as plurals
+ *  ("dentists", "barbershops"), and Overpass's `~` operator is a literal
+ *  substring/regex match — "dentists" never matches inside "dentist" since
+ *  it's the longer string. Without this, almost every plural search term
+ *  returns 0 results even when matching businesses exist. */
+function singularize(word: string): string {
+  if (word.endsWith("ies") && word.length > 3) return word.slice(0, -3) + "y";
+  if (word.endsWith("s") && word.length > 1) return word.slice(0, -1);
+  return word;
+}
+
+function normalizeIndustryKey(term: string): string {
+  return term.trim().toLowerCase().replace(/[^a-z]/g, "");
+}
+
+interface OsmTagAlternative {
+  key: "shop" | "craft" | "amenity" | "office" | "leisure" | "tourism";
+  value: string;
+}
+
+/**
+ * Maps common colloquial industry terms to the actual OSM tag vocabulary.
+ * Plural normalization alone fixes terms that already match OSM's tag value
+ * once singularized (e.g. "restaurants" -> amenity=restaurant), but many
+ * everyday terms don't share any substring with the tag OSM actually uses
+ * (a barbershop is shop=hairdresser, not shop=barber; a gym is
+ * leisure=fitness_centre, not amenity=gym) — those need an explicit mapping
+ * or they silently return 0 results no matter how the input is normalized.
+ * Keys are the singularized, alpha-only form of the search term.
+ */
+const INDUSTRY_SYNONYMS: Record<string, OsmTagAlternative[]> = {
+  barbershop: [{ key: "shop", value: "hairdresser" }],
+  barber: [{ key: "shop", value: "hairdresser" }],
+  hairsalon: [{ key: "shop", value: "hairdresser" }],
+  hairdresser: [{ key: "shop", value: "hairdresser" }],
+  salon: [{ key: "shop", value: "hairdresser|beauty" }],
+  nailsalon: [{ key: "shop", value: "beauty" }],
+  spa: [
+    { key: "leisure", value: "spa" },
+    { key: "shop", value: "beauty" },
+  ],
+  gym: [{ key: "leisure", value: "fitness_centre" }],
+  fitnesscenter: [{ key: "leisure", value: "fitness_centre" }],
+  fitnesscentre: [{ key: "leisure", value: "fitness_centre" }],
+  autorepair: [{ key: "shop", value: "car_repair" }],
+  mechanic: [{ key: "shop", value: "car_repair" }],
+  cardealer: [{ key: "shop", value: "car" }],
+  pharmacy: [{ key: "amenity", value: "pharmacy" }],
+  drugstore: [{ key: "amenity", value: "pharmacy" }],
+  doctor: [{ key: "amenity", value: "doctors" }],
+  clinic: [{ key: "amenity", value: "clinic" }],
+  lawyer: [{ key: "office", value: "lawyer" }],
+  attorney: [{ key: "office", value: "lawyer" }],
+  lawfirm: [{ key: "office", value: "lawyer" }],
+  realestate: [{ key: "office", value: "estate_agent" }],
+  realtor: [{ key: "office", value: "estate_agent" }],
+  veterinarian: [{ key: "amenity", value: "veterinary" }],
+  vet: [{ key: "amenity", value: "veterinary" }],
+  coffeeshop: [{ key: "amenity", value: "cafe" }],
+  bar: [{ key: "amenity", value: "bar" }],
+  pub: [{ key: "amenity", value: "pub" }],
+  hotel: [{ key: "tourism", value: "hotel" }],
+  motel: [{ key: "tourism", value: "motel" }],
+  tattooparlor: [{ key: "shop", value: "tattoo" }],
+  massage: [{ key: "shop", value: "massage|beauty" }],
+  laundromat: [{ key: "shop", value: "laundry" }],
+  drycleaner: [{ key: "shop", value: "dry_cleaning" }],
+};
+
+const DEFAULT_OSM_KEYS = ["shop", "craft", "amenity", "office"] as const;
+
+/**
+ * Builds the Overpass tag-matching clauses for an industry search: a known
+ * synonym maps to its real OSM tag(s); anything else falls back to a literal
+ * (singularized) match across the general-purpose category keys. Either way,
+ * a `name` match on the raw term is added so a business whose OSM name
+ * literally contains the search word is still caught.
+ */
+function buildOverpassTagClauses(industry: string, bbox: string): string[] {
+  const trimmed = industry.trim();
+  const normalized = normalizeIndustryKey(trimmed);
+  const alternatives =
+    INDUSTRY_SYNONYMS[normalized] ?? INDUSTRY_SYNONYMS[singularize(normalized)];
+
+  const clauses = alternatives
+    ? alternatives.map(
+        ({ key, value }) => `nwr["${key}"~"${value}",i](${bbox});`
+      )
+    : DEFAULT_OSM_KEYS.map((key) => {
+        const pattern = escapeRegex(singularize(trimmed.toLowerCase()));
+        return `nwr["${key}"~"${pattern}",i](${bbox});`;
+      });
+
+  clauses.push(`nwr["name"~"${escapeRegex(trimmed)}",i](${bbox});`);
+  return clauses;
+}
+
 async function geocodeBoundingBox(
   location: string
 ): Promise<{ south: number; west: number; north: number; east: number }> {
@@ -303,9 +401,12 @@ async function queryOverpassWithFailover(query: string): Promise<OverpassRespons
 /**
  * Searches OpenStreetMap: geocodes the location to a bounding box via
  * Nominatim, then queries Overpass (with mirror failover) for
- * nodes/ways/relations whose shop/craft/amenity/office/name tags match the
- * industry keyword. If every Overpass mirror fails, falls back to a
- * Nominatim free-text search instead of throwing.
+ * nodes/ways/relations whose tags match the industry keyword — translated to
+ * OSM's own tag vocabulary and singularized via buildOverpassTagClauses,
+ * since a literal match against raw user input (e.g. plural "dentists" or a
+ * colloquial term like "barbershops") mostly returns 0 results. If every
+ * Overpass mirror fails, falls back to a Nominatim free-text search instead
+ * of throwing.
  */
 async function searchBusinessesOSM(
   industry: string,
@@ -317,16 +418,12 @@ async function searchBusinessesOSM(
   try {
     const { south, west, north, east } = await geocodeBoundingBox(location);
     const bbox = `${south},${west},${north},${east}`;
-    const pattern = escapeRegex(industry.trim());
+    const tagClauses = buildOverpassTagClauses(industry, bbox);
 
     const query = `
       [out:json][timeout:9];
       (
-        nwr["shop"~"${pattern}",i](${bbox});
-        nwr["craft"~"${pattern}",i](${bbox});
-        nwr["amenity"~"${pattern}",i](${bbox});
-        nwr["office"~"${pattern}",i](${bbox});
-        nwr["name"~"${pattern}",i](${bbox});
+        ${tagClauses.join("\n        ")}
       );
       out center ${cap * 3};
     `;
