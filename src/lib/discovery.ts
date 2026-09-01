@@ -440,10 +440,21 @@ export async function importDiscoveredBusinesses(
   const newBusinesses = businesses.filter((b) => !existingPlaceIds.has(b.placeId));
   if (newBusinesses.length === 0) return [];
 
+  // `leads` has a unique (name, company) index — dedupe within this batch too,
+  // since discovery sources can return the same business name twice (e.g. a
+  // chain with multiple listings) and place_id alone won't catch that.
+  const seenNameCompany = new Set<string>();
+  const dedupedBusinesses = newBusinesses.filter((b) => {
+    const key = `${b.name}::${b.name}`;
+    if (seenNameCompany.has(key)) return false;
+    seenNameCompany.add(key);
+    return true;
+  });
+
   const { data: imported, error } = await supabase
     .from("leads")
-    .insert(
-      newBusinesses.map((b) => ({
+    .upsert(
+      dedupedBusinesses.map((b) => ({
         name: b.name,
         company: b.name,
         phone: b.phone,
@@ -458,7 +469,8 @@ export async function importDiscoveredBusinesses(
           industry,
           location,
         },
-      }))
+      })),
+      { onConflict: "name,company", ignoreDuplicates: true }
     )
     .select();
 

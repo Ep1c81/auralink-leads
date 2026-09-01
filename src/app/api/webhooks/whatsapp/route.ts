@@ -80,12 +80,36 @@ export async function POST(request: Request) {
       .single();
 
     if (createError || !created) {
-      return NextResponse.json(
-        { error: "Failed to create lead" },
-        { status: 500 }
-      );
+      // 23505 = Postgres unique_violation. `leads` has a composite UNIQUE
+      // (name, company) constraint; a redelivered/concurrent webhook for the
+      // same contact can race past the `existing`-by-phone lookup above and
+      // collide here. Meta retries webhook deliveries, so recover by
+      // looking the lead back up instead of dropping the inbound message.
+      if (createError?.code === "23505") {
+        const { data: recovered } = await supabase
+          .from("leads")
+          .select("*")
+          .eq("phone", from)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!recovered) {
+          return NextResponse.json(
+            { error: "Failed to create lead" },
+            { status: 500 }
+          );
+        }
+        lead = recovered as Lead;
+      } else {
+        return NextResponse.json(
+          { error: "Failed to create lead" },
+          { status: 500 }
+        );
+      }
+    } else {
+      lead = created as Lead;
     }
-    lead = created as Lead;
   }
 
   const { error: inboundError } = await supabase
