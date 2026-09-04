@@ -34,6 +34,13 @@ export default function Home() {
 
   const maxPages = Math.ceil(totalCount / pageSize);
 
+  const getWhatsAppLink = (rawPhone: string) => {
+    if (!rawPhone) return null;
+    const cleanNum = rawPhone.replace(/\D/g, "");
+    const formattedNum = cleanNum.length === 8 ? `506${cleanNum}` : cleanNum;
+    return `https://wa.me/${formattedNum}`;
+  };
+
   return (
     <main className="p-8 max-w-7xl mx-auto">
       <div className="flex justify-between items-center mb-6">
@@ -79,8 +86,8 @@ export default function Home() {
               <tr className="bg-gray-100 border-b border-gray-200 text-gray-700 text-sm">
                 <th className="p-4 font-semibold">Business Name</th>
                 <th className="p-4 font-semibold">Type</th>
-                <th className="p-4 font-semibold">Phone</th>
-                <th className="p-4 font-semibold">Email</th>
+                <th className="p-4 font-semibold">Phone / WhatsApp</th>
+                <th className="p-4 font-semibold">Website</th>
                 <th className="p-4 font-semibold">Address</th>
               </tr>
             </thead>
@@ -90,15 +97,41 @@ export default function Home() {
                   <td colSpan={5} className="p-6 text-center text-gray-500">No records found in bizmap_leads.</td>
                 </tr>
               ) : (
-                leads.map((lead) => (
-                  <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50 text-sm">
-                    <td className="p-4 font-medium text-gray-900">{lead.business_name || "Unnamed"}</td>
-                    <td className="p-4 text-blue-600 font-semibold">{lead.business_type || "N/A"}</td>
-                    <td className="p-4 text-gray-600">{lead.phone || "No phone"}</td>
-                    <td className="p-4 text-gray-600">{lead.email || "No email"}</td>
-                    <td className="p-4 text-gray-500 truncate max-w-xs">{lead.address || "N/A"}</td>
-                  </tr>
-                ))
+                leads.map((lead) => {
+                  const phoneVal = lead.phone_number;
+                  const waLink = getWhatsAppLink(phoneVal);
+
+                  return (
+                    <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50 text-sm">
+                      <td className="p-4 font-medium text-gray-900">{lead.business_name || "Unnamed"}</td>
+                      <td className="p-4 text-blue-600 font-semibold">{lead.business_type || "N/A"}</td>
+                      <td className="p-4">
+                        {waLink ? (
+                          <a 
+                            href={waLink} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white font-medium px-3 py-1.5 rounded-md text-xs shadow-sm transition-colors"
+                          >
+                            💬 {phoneVal}
+                          </a>
+                        ) : (
+                          <span className="text-gray-400 italic">No phone</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-gray-600 truncate max-w-xs">
+                        {lead.website ? (
+                          <a href={lead.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">
+                            {lead.website}
+                          </a>
+                        ) : (
+                          <span className="text-red-500 font-medium">Needs Website</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-gray-500 truncate max-w-xs">{lead.address || "N/A"}</td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
