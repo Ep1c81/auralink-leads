@@ -87,6 +87,7 @@ export default function Home() {
                 <th className="p-4 font-semibold">Business Name</th>
                 <th className="p-4 font-semibold">Type</th>
                 <th className="p-4 font-semibold">Phone / WhatsApp</th>
+                <th className="p-4 font-semibold">Email</th>
                 <th className="p-4 font-semibold">Website</th>
                 <th className="p-4 font-semibold">Address</th>
               </tr>
@@ -94,11 +95,12 @@ export default function Home() {
             <tbody>
               {leads.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="p-6 text-center text-gray-500">No records found in bizmap_leads.</td>
+                  <td colSpan={6} className="p-6 text-center text-gray-500">No records found in bizmap_leads.</td>
                 </tr>
               ) : (
                 leads.map((lead) => {
                   const phoneVal = lead.phone_number;
+                  const emailVal = lead.email;
                   const waLink = getWhatsAppLink(phoneVal);
 
                   return (
@@ -117,6 +119,15 @@ export default function Home() {
                           </a>
                         ) : (
                           <span className="text-gray-400 italic">No phone</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-gray-700">
+                        {emailVal ? (
+                          <a href={`mailto:${emailVal}`} className="text-blue-600 hover:underline">
+                            {emailVal}
+                          </a>
+                        ) : (
+                          <span className="text-gray-400 italic">No email</span>
                         )}
                       </td>
                       <td className="p-4 text-gray-600 truncate max-w-xs">
