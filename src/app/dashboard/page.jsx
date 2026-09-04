@@ -9,6 +9,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 export default function LeadDashboard() {
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState(null);
 
   useEffect(() => {
     async function fetchLeads() {
@@ -16,12 +17,13 @@ export default function LeadDashboard() {
         const { data, error } = await supabase
           .from("bizmap_leads")
           .select("*")
-          .limit(100); // Pulls first batch from your 17k+ records
+          .limit(100);
         
         if (error) throw error;
         setLeads(data || []);
       } catch (err) {
         console.error("Error fetching bizmap leads:", err.message);
+        setErrorMessage(err.message);
       } finally {
         setLoading(false);
       }
@@ -33,6 +35,12 @@ export default function LeadDashboard() {
     <main className="p-8 max-w-7xl mx-auto">
       <h1 className="text-3xl font-bold mb-6 text-gray-900">Auralink Digital CRM Pipeline</h1>
       
+      {errorMessage && (
+        <div className="mb-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
+          <strong>Database Error:</strong> {errorMessage}
+        </div>
+      )}
+
       {loading ? (
         <p className="text-gray-600">Loading full database pipeline...</p>
       ) : (
