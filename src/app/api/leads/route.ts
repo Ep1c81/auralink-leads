@@ -14,13 +14,17 @@ export async function GET(request: Request) {
     const from = page * pageSize;
     const to = from + pageSize - 1;
 
-    // Use "*" to fetch all available columns safely without risking missing column errors
     const { data, error, count } = await supabase
       .from("bizmap_leads")
       .select("*", { count: "exact" })
       .range(from, to);
 
     if (error) throw error;
+
+    // Log the exact keys of the first lead to your server console/Vercel logs
+    if (data && data.length > 0) {
+      console.log("ACTUAL SUPABASE COLUMNS AVAILABLE:", Object.keys(data[0]));
+    }
 
     return NextResponse.json({
       success: true,
