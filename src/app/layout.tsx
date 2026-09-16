@@ -1,6 +1,13 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+
+const NAV_LINKS = [
+  { href: "/", label: "Home" },
+  { href: "/pipeline", label: "Pipeline" },
+  { href: "/outreach", label: "Outreach" },
+] as const;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,7 +30,23 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <nav
+          aria-label="Main"
+          className="flex items-center gap-4 border-b border-white/10 bg-slate-950 px-4 py-3 text-sm text-white/80 sm:px-6"
+        >
+          {NAV_LINKS.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className="rounded px-1.5 py-1 font-medium transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              {link.label}
+            </Link>
+          ))}
+        </nav>
+        {children}
+      </body>
     </html>
   );
 }

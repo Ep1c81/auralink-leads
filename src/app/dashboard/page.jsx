@@ -90,6 +90,10 @@ export default function LeadDashboard() {
   const [activeFilters, setActiveFilters] = useState(() => new Set());
   const [pendingOutreachIds, setPendingOutreachIds] = useState(() => new Set());
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [promotingIds, setPromotingIds] = useState(() => new Set());
+  const [promotedIds, setPromotedIds] = useState(() => new Set());
+  const [duplicateIds, setDuplicateIds] = useState(() => new Set());
+  const [promoteErrors, setPromoteErrors] = useState({});
 
   // `cancelled` guards every setState call so a slow request that resolves
   // after the effect re-runs (or the component unmounts) never clobbers
@@ -179,6 +183,49 @@ export default function LeadDashboard() {
     }
   };
 
+  const handlePromote = async (lead) => {
+    setPromotingIds((prev) => new Set(prev).add(lead.id));
+    setPromoteErrors((prev) => {
+      const next = { ...prev };
+      delete next[lead.id];
+      return next;
+    });
+
+    try {
+      const res = await fetch("/api/qualify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: lead.business_name,
+          company: lead.business_name,
+          phone: lead.phone_number,
+          email: lead.email || undefined,
+          auto_qualify: true,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        if (res.status === 409 && body?.error === "duplicate_prospect") {
+          setDuplicateIds((prev) => new Set(prev).add(lead.id));
+          return;
+        }
+        throw new Error(body?.error || `Request failed (${res.status})`);
+      }
+
+      setPromotedIds((prev) => new Set(prev).add(lead.id));
+    } catch (err) {
+      console.error("Error promoting lead to pipeline:", err);
+      setPromoteErrors((prev) => ({ ...prev, [lead.id]: err.message }));
+    } finally {
+      setPromotingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(lead.id);
+        return next;
+      });
+    }
+  };
+
   return (
     <main className="p-8 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
@@ -259,12 +306,13 @@ export default function LeadDashboard() {
                     <th className="p-4 font-semibold">Score</th>
                     <th className="p-4 font-semibold">Status</th>
                     <th className="p-4 font-semibold">Outreach</th>
+                    <th className="p-4 font-semibold">Pipeline</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleLeads.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="p-6 text-center text-gray-500 dark:text-zinc-400">
+                      <td colSpan={8} className="p-6 text-center text-gray-500 dark:text-zinc-400">
                         No leads match the current filters.
                       </td>
                     </tr>
@@ -274,6 +322,10 @@ export default function LeadDashboard() {
                       const hasWebsite = lead.website && lead.website !== "N/A";
                       const followUp = isFollowUpNeeded(lead);
                       const pending = pendingOutreachIds.has(lead.id);
+                      const promoting = promotingIds.has(lead.id);
+                      const promoted = promotedIds.has(lead.id);
+                      const duplicate = duplicateIds.has(lead.id);
+                      const promoteError = promoteErrors[lead.id];
 
                       return (
                         <tr
@@ -330,6 +382,38 @@ export default function LeadDashboard() {
                               {followUp && (
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300">
                                   Follow up
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <div className="flex flex-col items-start gap-1">
+                              {promoted ? (
+                                <button
+                                  disabled
+                                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 disabled:opacity-100"
+                                >
+                                  ✓ In Pipeline
+                                </button>
+                              ) : duplicate ? (
+                                <button
+                                  disabled
+                                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-100 text-gray-500 dark:bg-zinc-800 dark:text-zinc-400 disabled:opacity-100"
+                                >
+                                  Already in Pipeline
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => handlePromote(lead)}
+                                  disabled={promoting}
+                                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-900 text-white hover:bg-gray-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50"
+                                >
+                                  {promoting ? "Promoting…" : "Promote to Pipeline"}
+                                </button>
+                              )}
+                              {promoteError && (
+                                <span className="text-xs text-red-600 dark:text-red-400">
+                                  {promoteError}
                                 </span>
                               )}
                             </div>
