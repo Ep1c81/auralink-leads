@@ -1,42 +1,58 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
+import { describeFetchCause } from "@/lib/apiErrors";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://paggxsvqosfduuqlgydl.supabase.co";
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "sb_publishable_HdrCoyome63dHoq-_Q_khw_reIHm...";
-const supabase = createClient(supabaseUrl, supabaseKey);
+export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+export async function GET() {
+  // Validate configuration before touching the network, so a missing or
+  // malformed variable reports itself by name instead of surfacing as a
+  // generic `TypeError: fetch failed`.
+  const env = resolveSupabaseEnv();
+  if (env.problems.length > 0) {
+    console.error("[/api/leads] Supabase misconfigured:", env.problems);
+    return NextResponse.json(
+      {
+        error: "Supabase is not configured",
+        problems: env.problems,
+      },
+      { status: 500 }
+    );
+  }
+
   try {
-    const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get("page") || "0", 10);
-    const pageSize = 750;
+    const { data, error } = await getSupabase()
+      .from("leads")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(100);
 
-    const from = page * pageSize;
-    const to = from + pageSize - 1;
-
-    const { data, error, count } = await supabase
-      .from("bizmap_leads")
-      .select("*", { count: "exact" })
-      .range(from, to);
-
-    if (error) throw error;
-
-    // Log the exact keys of the first lead to your server console/Vercel logs
-    if (data && data.length > 0) {
-      console.log("ACTUAL SUPABASE COLUMNS AVAILABLE:", Object.keys(data[0]));
+    if (error) {
+      // A PostgREST-level error: the connection worked, the query did not.
+      console.error("[/api/leads] Supabase query error:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      return NextResponse.json(
+        { error: "Failed to load leads", code: error.code, details: error.message },
+        { status: 500 }
+      );
     }
 
-    return NextResponse.json({
-      success: true,
-      data: data || [],
-      count: count || 0,
-      page,
-      pageSize,
+    return NextResponse.json({ leads: data ?? [] });
+  } catch (error) {
+    // A transport-level failure: DNS, TLS, or an unreachable host. This is the
+    // branch that produces `TypeError: fetch failed`.
+    const cause = describeFetchCause(error);
+    console.error("[/api/leads] Network failure reaching Supabase:", {
+      supabaseUrl: env.url,
+      keySource: env.keyName,
+      ...cause,
     });
-  } catch (err: any) {
-    console.error("API error fetching leads:", err.message);
     return NextResponse.json(
-      { success: false, error: err.message },
+      { error: "Could not reach Supabase", details: cause },
       { status: 500 }
     );
   }
