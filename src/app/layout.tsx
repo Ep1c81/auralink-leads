@@ -5,7 +5,7 @@ import "./globals.css";
 
 const NAV_LINKS = [
   { href: "/", label: "Home" },
-  { href: "/pipeline", label: "Pipeline" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/outreach", label: "Outreach" },
 ] as const;
 
