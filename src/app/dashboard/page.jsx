@@ -1,25 +1,17 @@
 "use client";
 import { useState, useEffect, useMemo } from "react";
 
-// Costa Rica: local numbers are 8 digits with no area code; +506 is the
-// country code. This is a best-effort formatter for wa.me links, not
-// validation — a number that doesn't fit either shape is passed through
-// as-is rather than rejected, since a wrong-but-present number is still
-// worth a rep double-checking manually.
-const CR_COUNTRY_CODE = "506";
+import {
+  formatWhatsAppNumber,
+  buildOutreachMessage,
+  buildWhatsAppUrl,
+  cantonFromAddress,
+} from "@/lib/whatsapp";
+
 const PAGE_SIZE = 50;
 // "Contacted, nothing further tracked, N days later" — a coarse proxy for
 // follow-up, since bizmap_leads has no reply/reminder tracking of its own.
 const FOLLOW_UP_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
-
-function formatWhatsAppNumber(raw) {
-  if (!raw || raw === "N/A") return null;
-  const digits = raw.replace(/\D/g, "");
-  if (!digits) return null;
-  if (digits.length === 8) return CR_COUNTRY_CODE + digits;
-  if (digits.startsWith(CR_COUNTRY_CODE) && digits.length >= 10) return digits;
-  return digits.length >= 8 ? digits : null;
-}
 
 async function fetchBizmapLeads() {
   const res = await fetch("/api/bizmap-leads");
@@ -159,7 +151,11 @@ export default function LeadDashboard() {
     const waNumber = formatWhatsAppNumber(lead.phone_number);
     if (!waNumber) return;
 
-    window.open(`https://wa.me/${waNumber}`, "_blank", "noopener,noreferrer");
+    const message = buildOutreachMessage({
+      businessName: lead.business_name,
+      canton: cantonFromAddress(lead.address),
+    });
+    window.open(buildWhatsAppUrl(waNumber, message), "_blank", "noopener,noreferrer");
 
     if (lead.outreached_at) return; // already tracked — don't re-stamp on repeat clicks
 
