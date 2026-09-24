@@ -6,7 +6,7 @@
 export const CR_COUNTRY_CODE = "506";
 const E164_MAX_DIGITS = 15;
 
-/** Digits-only number ready for `https://wa.me/<number>`, or null if unusable. */
+/** Digits-only international number for WhatsApp click-to-chat links, or null if unusable. */
 export function formatWhatsAppNumber(raw: string | null | undefined): string | null {
   if (!raw || raw === "N/A") return null;
   const digits = raw.replace(/\D/g, "");
@@ -30,13 +30,43 @@ export function cantonFromAddress(address: string | null | undefined): string {
   return cleaned;
 }
 
+export type OutreachStage = "pitch" | "follow_up";
+
+export const OUTREACH_STAGES: { value: OutreachStage; label: string }[] = [
+  { value: "pitch", label: "Mensaje 1: Pitch Inicial" },
+  { value: "follow_up", label: "Mensaje 2: Seguimiento (Sin respuesta)" },
+];
+
+/** Stage a rep most likely wants: anyone already messaged gets the follow-up. */
+export function defaultOutreachStage(outreachedAt: string | null | undefined): OutreachStage {
+  return outreachedAt ? "follow_up" : "pitch";
+}
+
 export function buildOutreachMessage({
   businessName,
   canton,
+  stage = "pitch",
 }: {
   businessName?: string | null;
   canton?: string | null;
+  stage?: OutreachStage;
 }): string {
+  if (stage === "follow_up") return buildFollowUpMessage(businessName);
+  return buildPitchMessage(businessName, canton);
+}
+
+function buildFollowUpMessage(businessName?: string | null): string {
+  const name = businessName?.trim() || "su negocio";
+  return `Hola, equipo de ${name}. 👋
+
+Le escribí hace unos días sobre cómo eliminar la fricción que tienen sus clientes para dejarles reseñas de 5 estrellas en Google Maps.
+
+Sabemos que los clientes quedan encantados con su servicio, pero la mayoría simplemente olvida dejar la opinión si el proceso no es instantáneo.
+
+¿Pudo ver el mensaje anterior, o prefiere que le envíe el video corto de 20 segundos por acá?`.normalize("NFC");
+}
+
+function buildPitchMessage(businessName?: string | null, canton?: string | null): string {
   const name = businessName?.trim() || "su negocio";
   const zone = canton?.trim() || "la zona";
   // "en la zona de la zona" is nonsense, so the fallback drops the "de".
@@ -60,10 +90,13 @@ En Auralink Digital desarrollamos un sistema inteligente con placas NFC / QR de 
 
 🔥 Oferta exclusiva para la zona: Solo estamos activando 5 placas piloto esta semana para negocios verificados en ${zone} con condiciones especiales.
 
-Sin compromiso alguno, ¿le parecería bien si le comparto un video corto de 20 segundos para que vea cómo funciona en vivo?`;
+Sin compromiso alguno, ¿le parecería bien si le comparto un video corto de 20 segundos para que vea cómo funciona en vivo?`.normalize("NFC");
 }
 
+// Not wa.me: its redirect to api.whatsapp.com mangles 4-byte UTF-8 (emoji
+// such as 🚨 / 👋 / 🔥) in the prefilled text, which then shows up as "�" in
+// the chat box. Linking to api.whatsapp.com directly skips that hop.
 export function buildWhatsAppUrl(waNumber: string, message?: string): string {
-  const base = `https://wa.me/${waNumber}`;
-  return message ? `${base}?text=${encodeURIComponent(message)}` : base;
+  const base = `https://api.whatsapp.com/send?phone=${waNumber}`;
+  return message ? `${base}&text=${encodeURIComponent(message)}` : base;
 }

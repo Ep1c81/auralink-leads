@@ -6,6 +6,8 @@ import {
   buildOutreachMessage,
   buildWhatsAppUrl,
   cantonFromAddress,
+  defaultOutreachStage,
+  OUTREACH_STAGES,
 } from "@/lib/whatsapp";
 
 const PAGE_SIZE = 50;
@@ -81,6 +83,8 @@ export default function LeadDashboard() {
   const [error, setError] = useState(null);
   const [activeFilters, setActiveFilters] = useState(() => new Set());
   const [pendingOutreachIds, setPendingOutreachIds] = useState(() => new Set());
+  // Per-lead stage the rep picked; unset rows fall back to defaultOutreachStage.
+  const [stageOverrides, setStageOverrides] = useState({});
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [promotingIds, setPromotingIds] = useState(() => new Set());
   const [promotedIds, setPromotedIds] = useState(() => new Set());
@@ -147,6 +151,8 @@ export default function LeadDashboard() {
 
   const visibleLeads = filteredLeads.slice(0, visibleCount);
 
+  const stageFor = (lead) => stageOverrides[lead.id] ?? defaultOutreachStage(lead.outreached_at);
+
   const handleOutreach = async (lead) => {
     const waNumber = formatWhatsAppNumber(lead.phone_number);
     if (!waNumber) return;
@@ -154,6 +160,7 @@ export default function LeadDashboard() {
     const message = buildOutreachMessage({
       businessName: lead.business_name,
       canton: cantonFromAddress(lead.address),
+      stage: stageFor(lead),
     });
     window.open(buildWhatsAppUrl(waNumber, message), "_blank", "noopener,noreferrer");
 
@@ -360,13 +367,29 @@ export default function LeadDashboard() {
                           <td className="p-4">
                             <div className="flex items-center gap-2">
                               {waNumber ? (
-                                <button
-                                  onClick={() => handleOutreach(lead)}
-                                  disabled={pending}
-                                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
-                                >
-                                  {lead.outreached_at ? "Message again" : "WhatsApp"}
-                                </button>
+                                <>
+                                  <select
+                                    value={stageFor(lead)}
+                                    onChange={(e) =>
+                                      setStageOverrides((prev) => ({ ...prev, [lead.id]: e.target.value }))
+                                    }
+                                    aria-label="Outreach message"
+                                    className="px-2 py-1.5 rounded-md text-xs border border-gray-300 bg-white text-gray-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  >
+                                    {OUTREACH_STAGES.map((s) => (
+                                      <option key={s.value} value={s.value}>
+                                        {s.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    onClick={() => handleOutreach(lead)}
+                                    disabled={pending}
+                                    className="px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                  >
+                                    {lead.outreached_at ? "Message again" : "WhatsApp"}
+                                  </button>
+                                </>
                               ) : (
                                 <span className="text-xs text-gray-400 dark:text-zinc-500">No phone</span>
                               )}
