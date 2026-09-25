@@ -9,7 +9,8 @@ const E164_MAX_DIGITS = 15;
 /** Digits-only international number for WhatsApp click-to-chat links, or null if unusable. */
 export function formatWhatsAppNumber(raw: string | null | undefined): string | null {
   if (!raw || raw === "N/A") return null;
-  const digits = raw.replace(/\D/g, "");
+  // "00" is the international dialing prefix ("00506 2269 3709"), not part of the number.
+  const digits = raw.replace(/\D/g, "").replace(/^00/, "");
   if (!digits) return null;
   if (digits.length === 8) return CR_COUNTRY_CODE + digits;
   // Longer than E.164 allows — typically several numbers run together in the

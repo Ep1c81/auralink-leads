@@ -174,48 +174,47 @@ export async function listCampaigns(): Promise<OutreachCampaignWithCounts[]> {
     return [];
   }
 
-  const { data: messages, error: messagesError } = await supabase
-    .from("outreach_messages")
-    .select("campaign_id, status")
-    .in(
-      "campaign_id",
-      campaigns.map((c) => c.id)
-    );
-
-  if (messagesError) {
-    throw new Error(`Failed to load campaign message counts: ${messagesError.message}`);
-  }
-
-  const { data: replies, error: repliesError } = await supabase
-    .from("outreach_replies")
-    .select("message_id, outreach_messages!inner(campaign_id)");
-
-  if (repliesError) {
-    throw new Error(`Failed to load campaign reply counts: ${repliesError.message}`);
-  }
-
-  const counts = new Map<string, { message_count: number; sent_count: number }>();
-  for (const m of messages ?? []) {
-    const entry = counts.get(m.campaign_id) ?? { message_count: 0, sent_count: 0 };
-    entry.message_count += 1;
-    if (m.status === "sent") entry.sent_count += 1;
-    counts.set(m.campaign_id, entry);
-  }
-
-  const replyCounts = new Map<string, number>();
-  for (const r of (replies ?? []) as unknown as Array<{
-    outreach_messages: { campaign_id: string } | null;
-  }>) {
-    const campaignId = r.outreach_messages?.campaign_id;
-    if (!campaignId) continue;
-    replyCounts.set(campaignId, (replyCounts.get(campaignId) ?? 0) + 1);
-  }
+  // Exact per-campaign counts rather than fetching every row: PostgREST caps
+  // unpaginated selects at 1,000 rows, which silently undercounted once the
+  // campaigns together held more drafts than that.
+  const countsList = await Promise.all(
+    campaigns.map(async (c) => {
+      const [total, sent, replies] = await Promise.all([
+        supabase
+          .from("outreach_messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", c.id),
+        supabase
+          .from("outreach_messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", c.id)
+          .eq("status", "sent"),
+        supabase
+          .from("outreach_replies")
+          .select("message_id, outreach_messages!inner(campaign_id)", { count: "exact", head: true })
+          .eq("outreach_messages.campaign_id", c.id),
+      ]);
+      if (total.error || sent.error) {
+        throw new Error(
+          `Failed to load campaign message counts: ${(total.error ?? sent.error)!.message}`
+        );
+      }
+      if (replies.error) {
+        throw new Error(`Failed to load campaign reply counts: ${replies.error.message}`);
+      }
+      return [
+        c.id,
+        { message_count: total.count ?? 0, sent_count: sent.count ?? 0, reply_count: replies.count ?? 0 },
+      ] as const;
+    })
+  );
+  const counts = new Map(countsList);
 
   return campaigns.map((c) => ({
     ...(c as OutreachCampaign),
     message_count: counts.get(c.id)?.message_count ?? 0,
     sent_count: counts.get(c.id)?.sent_count ?? 0,
-    reply_count: replyCounts.get(c.id) ?? 0,
+    reply_count: counts.get(c.id)?.reply_count ?? 0,
   }));
 }
 
