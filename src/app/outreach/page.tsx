@@ -2,6 +2,7 @@ import { listCampaigns } from "@/lib/outreachCampaigns";
 import { CampaignCard } from "@/components/outreach/CampaignCard";
 import { CampaignTable } from "@/components/outreach/CampaignTable";
 import { CreateCampaignFlow } from "@/components/outreach/CreateCampaignFlow";
+import { DispatchPanel } from "@/components/outreach/DispatchPanel";
 import { DraftLeadPanel } from "@/components/outreach/DraftLeadPanel";
 import { EmptyState } from "@/components/outreach/EmptyState";
 import { body, eyebrow, pageTitle } from "@/components/outreach/theme";
@@ -29,6 +30,8 @@ export default async function OutreachPage({
           Review WhatsApp message drafts for your leads before they go out.
         </p>
       </header>
+
+      <DispatchPanel />
 
       {draftLead && (
         <DraftLeadPanel
