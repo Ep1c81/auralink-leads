@@ -26,7 +26,7 @@ export default async function OutreachPage({
         <p className={eyebrow}>AuraLink Digital · Outreach</p>
         <h1 className={pageTitle}>Campaigns</h1>
         <p className={`mt-1.5 ${body}`}>
-          Review Gemini-drafted emails for your qualified leads before they go out.
+          Review WhatsApp message drafts for your leads before they go out.
         </p>
       </header>
 

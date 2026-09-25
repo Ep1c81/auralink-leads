@@ -1,3 +1,9 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Outreach",
+};
+
 // Forces the dark, glassmorphism "high-tech" surface for the outreach module
 // regardless of the visitor's system color scheme — deliberately distinct
 // from the light, dark:-variant main dashboard at "/". Purely decorative and
