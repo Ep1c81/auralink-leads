@@ -6,7 +6,11 @@
 export const CR_COUNTRY_CODE = "506";
 const E164_MAX_DIGITS = 15;
 
-/** Digits-only international number for WhatsApp click-to-chat links, or null if unusable. */
+/**
+ * Digits-only international number for WhatsApp click-to-chat links, or null
+ * if unusable. Mirrored in SQL by public.format_wa_phone (which backs the
+ * bizmap_leads.wa_phone generated column) — change both together.
+ */
 export function formatWhatsAppNumber(raw: string | null | undefined): string | null {
   if (!raw || raw === "N/A") return null;
   // "00" is the international dialing prefix ("00506 2269 3709"), not part of the number.
