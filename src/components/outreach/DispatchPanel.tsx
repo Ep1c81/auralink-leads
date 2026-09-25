@@ -166,7 +166,12 @@ export function DispatchPanel() {
       {phase === "sent" && result && (
         <p role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
           Sent {result.dispatched} pitch{result.dispatched === 1 ? "" : "es"} to Make
-          {result.skipped_duplicates > 0 && ` · ${result.skipped_duplicates} duplicate number(s) skipped`}.
+          {result.skipped_duplicates > 0 && ` · ${result.skipped_duplicates} duplicate number(s) skipped`}
+          {result.campaign_messages_marked === null
+            ? " · campaign messages could not be updated"
+            : result.campaign_messages_marked > 0 &&
+              ` · ${result.campaign_messages_marked} campaign message(s) marked sent`}
+          .
         </p>
       )}
 

@@ -24,6 +24,16 @@ const STAGE_TEMPLATE: Record<SequenceStage, OutreachStage> = {
   followup_2: "follow_up",
 };
 
+/**
+ * Subject of the campaign drafts (outreach_messages) built from each stage's
+ * template. After a send, matching draft/queued rows are marked sent so the
+ * campaign page agrees with bizmap_leads.
+ */
+const STAGE_CAMPAIGN_SUBJECT: Record<SequenceStage, string> = {
+  pitch_1: "Mensaje 1: Pitch Inicial",
+  followup_2: "Mensaje 2: Seguimiento (Sin respuesta)",
+};
+
 const DEFAULT_BATCH_SIZE = 25;
 const MAX_BATCH_SIZE = 100;
 const FOLLOW_UP_AFTER_DAYS = 3;
@@ -66,6 +76,11 @@ export interface DispatchResult {
   dispatched: number;
   /** Rows dropped from the sequence because another row already covers their number. */
   skipped_duplicates: number;
+  /**
+   * Campaign messages (outreach_messages) marked sent to match this batch;
+   * null on dry runs, or when that update failed (the batch still went out).
+   */
+  campaign_messages_marked: number | null;
   leads: DispatchItem[];
 }
 
@@ -244,6 +259,24 @@ async function markContacted(
 }
 
 /**
+ * Marks the campaign copies of this stage's message as sent for the numbers
+ * just dispatched. Best effort: the batch has already gone out and
+ * bizmap_leads is updated, so a failure here is logged rather than thrown.
+ */
+async function markCampaignMessagesSent(stage: SequenceStage, items: DispatchItem[]): Promise<number | null> {
+  const { data, error } = await getSupabase().rpc("mark_campaign_messages_sent", {
+    p_wa_phones: items.map((i) => i.phone.replace(/^\+/, "")),
+    p_subject: STAGE_CAMPAIGN_SUBJECT[stage],
+    p_sent_at: new Date().toISOString(),
+  });
+  if (error) {
+    console.error("[outreachAutomation] failed to mark campaign messages sent:", error.message);
+    return null;
+  }
+  return data as number;
+}
+
+/**
  * Stage 1: sends the soft-CTA pitch to a batch of Queued leads and moves them
  * to "Pitch Sent". Not safe to run concurrently with itself — schedule a
  * single caller (one Make scenario).
@@ -311,6 +344,7 @@ async function sendBatch(
   const items = leads.map((lead) => toDispatchItem(lead, stage));
   // Runs on dry runs too, so a preview surfaces the same errors a real send would.
   assertValidItems(items);
+  let campaignMarked: number | null = null;
   if (items.length > 0 && !options.dryRun) {
     await postToMake(stage, items);
     await markContacted(
@@ -318,6 +352,9 @@ async function sendBatch(
       from,
       to
     );
+    campaignMarked = await markCampaignMessagesSent(stage, items);
+  } else if (!options.dryRun) {
+    campaignMarked = 0;
   }
 
   return {
@@ -325,6 +362,7 @@ async function sendBatch(
     dry_run: options.dryRun,
     dispatched: items.length,
     skipped_duplicates: skipped,
+    campaign_messages_marked: campaignMarked,
     leads: items,
   };
 }
