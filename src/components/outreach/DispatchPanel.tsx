@@ -40,8 +40,8 @@ type Phase = "idle" | "previewing" | "previewed" | "sending" | "sent";
  * Manual trigger for stage 1 of the automated WhatsApp sequence. Calls
  * /api/outreach/dispatch with the OUTREACH_AUTOMATION_SECRET the operator
  * types in — the CRM has no login, so the secret is never shipped in the
- * bundle. Always previews (dry_run) first; the real send is a second,
- * explicit click.
+ * bundle. "Preview batch" does a dry_run first; "Send now" skips the preview
+ * and dispatches straight away.
  */
 export function DispatchPanel() {
   const [open, setOpen] = useState(false);
@@ -189,21 +189,29 @@ export function DispatchPanel() {
               Send {leads.length} pitch{leads.length === 1 ? "" : "es"}
             </button>
           </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => (phase === "sent" ? reset() : dispatch(true))}
-            className={primaryButton}
-            disabled={busy || !secret.trim()}
-          >
-            {phase === "previewing"
-              ? "Loading preview…"
-              : phase === "sending"
-                ? "Sending…"
-                : phase === "sent"
-                  ? "Start another batch"
-                  : "Preview batch"}
+        ) : phase === "sent" ? (
+          <button type="button" onClick={reset} className={primaryButton}>
+            Start another batch
           </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => dispatch(true)}
+              className={secondaryButton}
+              disabled={busy || !secret.trim()}
+            >
+              {phase === "previewing" ? "Loading preview…" : "Preview batch"}
+            </button>
+            <button
+              type="button"
+              onClick={() => dispatch(false)}
+              className={successButton}
+              disabled={busy || !secret.trim()}
+            >
+              {phase === "sending" ? "Sending…" : `Send now (${limit})`}
+            </button>
+          </>
         )}
       </div>
     </section>
