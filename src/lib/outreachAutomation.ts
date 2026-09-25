@@ -56,6 +56,8 @@ export interface DispatchOptions {
   limit: number;
   dryRun: boolean;
   mobileOnly: boolean;
+  /** When set, only these bizmap_leads ids are considered (still subject to the stage's status filter). */
+  leadIds: string[] | null;
 }
 
 export interface DispatchResult {
@@ -84,10 +86,13 @@ export function checkAutomationAuth(request: Request): NextResponse | null {
   return null;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Reads `limit`, `dry_run` and `mobile_only` from the query string.
+ * Reads `limit`, `dry_run`, `mobile_only` and `lead_ids` from the query string.
  * mobile_only defaults to on (landlines rarely have WhatsApp); pass
- * `mobile_only=0` to include them.
+ * `mobile_only=0` to include them. `lead_ids` is a comma-separated list of
+ * bizmap_leads ids that narrows the batch to just those leads.
  */
 export function parseDispatchOptions(request: Request): DispatchOptions {
   const params = new URL(request.url).searchParams;
@@ -99,7 +104,21 @@ export function parseDispatchOptions(request: Request): DispatchOptions {
     const value = params.get(name);
     return value === null ? fallback : ["1", "true"].includes(value);
   };
-  return { limit, dryRun: flag("dry_run", false), mobileOnly: flag("mobile_only", true) };
+  const rawIds = params.get("lead_ids");
+  let leadIds: string[] | null = null;
+  if (rawIds !== null) {
+    leadIds = [...new Set(rawIds.split(",").map((id) => id.trim()).filter(Boolean))];
+    const bad = leadIds.filter((id) => !UUID.test(id));
+    if (leadIds.length === 0 || bad.length > 0) {
+      throw new DispatchInputError(
+        leadIds.length === 0 ? "lead_ids is empty" : `Invalid lead_ids: ${bad.join(", ")}`
+      );
+    }
+    if (leadIds.length > MAX_BATCH_SIZE) {
+      throw new DispatchInputError(`lead_ids accepts at most ${MAX_BATCH_SIZE} ids`);
+    }
+  }
+  return { limit, dryRun: flag("dry_run", false), mobileOnly: flag("mobile_only", true), leadIds };
 }
 
 function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem {
@@ -133,6 +152,9 @@ async function postToMake(stage: SequenceStage, leads: DispatchItem[]): Promise<
 }
 
 export class DispatchConfigError extends Error {}
+
+/** Bad query parameters from the caller; reported as a 400. */
+export class DispatchInputError extends Error {}
 
 const SEQUENCE_STAGES: readonly SequenceStage[] = ["pitch_1", "followup_2"];
 
@@ -227,12 +249,14 @@ async function markContacted(
  * single caller (one Make scenario).
  */
 export async function dispatchPitches(options: DispatchOptions): Promise<DispatchResult> {
-  const { data, error } = await getSupabase()
+  let query = getSupabase()
     .from("bizmap_leads")
     .select("id, business_name, address, wa_phone")
     .eq("outreach_status", "Queued")
     .eq("has_replied", false)
-    .filter("wa_phone", "match", options.mobileOnly ? CR_MOBILE_NUMBER : CR_NUMBER)
+    .filter("wa_phone", "match", options.mobileOnly ? CR_MOBILE_NUMBER : CR_NUMBER);
+  if (options.leadIds) query = query.in("id", options.leadIds);
+  const { data, error } = await query
     .order("lead_score", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: true })
     .limit(options.limit);
@@ -247,13 +271,15 @@ export async function dispatchPitches(options: DispatchOptions): Promise<Dispatc
  */
 export async function dispatchFollowUps(options: DispatchOptions): Promise<DispatchResult> {
   const cutoff = new Date(Date.now() - FOLLOW_UP_AFTER_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const { data, error } = await getSupabase()
+  let query = getSupabase()
     .from("bizmap_leads")
     .select("id, business_name, address, wa_phone")
     .eq("outreach_status", "Pitch Sent")
     .eq("has_replied", false)
     .lt("last_contacted_at", cutoff)
-    .filter("wa_phone", "match", options.mobileOnly ? CR_MOBILE_NUMBER : CR_NUMBER)
+    .filter("wa_phone", "match", options.mobileOnly ? CR_MOBILE_NUMBER : CR_NUMBER);
+  if (options.leadIds) query = query.in("id", options.leadIds);
+  const { data, error } = await query
     .order("last_contacted_at", { ascending: true })
     .limit(options.limit);
   if (error) throw new Error(`Failed to load follow-up leads: ${error.message}`);
@@ -312,8 +338,18 @@ export async function handleDispatchRequest(
   const unauthorized = checkAutomationAuth(request);
   if (unauthorized) return unauthorized;
 
+  let options: DispatchOptions;
   try {
-    const result = await run(parseDispatchOptions(request));
+    options = parseDispatchOptions(request);
+  } catch (err) {
+    if (err instanceof DispatchInputError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+
+  try {
+    const result = await run(options);
     return NextResponse.json(result);
   } catch (err) {
     console.error(`[${logTag}] dispatch failed:`, err);
