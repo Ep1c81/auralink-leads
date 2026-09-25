@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { isCrProvince, provinceFromAddress, type CrProvince } from "@/lib/costaRica";
 import { buildOutreachMessage, cantonFromAddress, type OutreachStage } from "@/lib/whatsapp";
 
 /**
@@ -45,6 +46,8 @@ export interface DispatchItem {
   phone: string;
   business_name: string;
   canton: string;
+  /** "" when the address doesn't identify one (most leads are just "GAM"). */
+  province: CrProvince | "";
   message_text: string;
   sequence_stage: SequenceStage;
 }
@@ -107,6 +110,7 @@ function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem
     phone: `+${lead.wa_phone}`,
     business_name: businessName,
     canton,
+    province: provinceFromAddress(lead.address),
     message_text: buildOutreachMessage({ businessName, canton, stage: STAGE_TEMPLATE[stage] }),
     sequence_stage: stage,
   };
@@ -129,6 +133,36 @@ async function postToMake(stage: SequenceStage, leads: DispatchItem[]): Promise<
 }
 
 export class DispatchConfigError extends Error {}
+
+const SEQUENCE_STAGES: readonly SequenceStage[] = ["pitch_1", "followup_2"];
+
+/**
+ * Checks one lead against the payload contract the Make scenario maps from.
+ * Returns the problems found; an empty list means the item is valid.
+ */
+export function validateDispatchItem(item: DispatchItem): string[] {
+  const errors: string[] = [];
+  if (!item.lead_id) errors.push("lead_id is empty");
+  if (!/^\+506[0-9]{8}$/.test(item.phone)) errors.push(`phone "${item.phone}" is not +506 followed by 8 digits`);
+  if (typeof item.business_name !== "string") errors.push("business_name is not a string");
+  if (typeof item.canton !== "string") errors.push("canton is not a string");
+  if (item.province !== "" && !isCrProvince(item.province)) {
+    errors.push(`province "${item.province}" is not a Costa Rican province`);
+  }
+  if (!item.message_text?.trim()) errors.push("message_text is empty");
+  if (!SEQUENCE_STAGES.includes(item.sequence_stage)) errors.push(`unknown sequence_stage "${item.sequence_stage}"`);
+  return errors;
+}
+
+/** Throws before anything is sent if any item breaks the payload contract. */
+function assertValidItems(items: DispatchItem[]): void {
+  const problems = items.flatMap((item) =>
+    validateDispatchItem(item).map((error) => `${item.lead_id || "(no id)"}: ${error}`)
+  );
+  if (problems.length > 0) {
+    throw new Error(`Invalid dispatch payload, nothing sent: ${problems.slice(0, 5).join("; ")}`);
+  }
+}
 
 /**
  * Drops leads whose number is already covered: a duplicate within this batch,
@@ -249,6 +283,8 @@ async function sendBatch(
   }
 
   const items = leads.map((lead) => toDispatchItem(lead, stage));
+  // Runs on dry runs too, so a preview surfaces the same errors a real send would.
+  assertValidItems(items);
   if (items.length > 0 && !options.dryRun) {
     await postToMake(stage, items);
     await markContacted(
