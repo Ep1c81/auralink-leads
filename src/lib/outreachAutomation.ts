@@ -45,7 +45,7 @@ export interface DispatchItem {
   phone: string;
   business_name: string;
   canton: string;
-  template_text: string;
+  message_text: string;
   sequence_stage: SequenceStage;
 }
 
@@ -107,7 +107,7 @@ function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem
     phone: `+${lead.wa_phone}`,
     business_name: businessName,
     canton,
-    template_text: buildOutreachMessage({ businessName, canton, stage: STAGE_TEMPLATE[stage] }),
+    message_text: buildOutreachMessage({ businessName, canton, stage: STAGE_TEMPLATE[stage] }),
     sequence_stage: stage,
   };
 }
