@@ -85,13 +85,12 @@ Estaba revisando las búsquedas locales ${inZoneOf} y noté algo crítico:
 
 Su negocio tiene un excelente servicio, pero sus competidores más cercanos se están llevando a los clientes listos para pagar solo porque tienen más opiniones de 5 estrellas acumuladas en Google Maps.
 
-Hoy en día, el 88% de las personas en Costa Rica deciden a dónde ir basándose únicamente en la reputación en Google antes de llamar o pedir un Uber. Si no está capturando esas reseñas en el momento exacto en que sus clientes están satisfechos, está dejando ingresos sobre la mesa todos los meses.
+Si no está capturando esas reseñas en el momento exacto en que sus clientes están satisfechos, está dejando ingresos sobre la mesa todos los meses.
 
-En Auralink Digital desarrollamos un sistema inteligente con placas NFC / QR de contacto directo y filtrado automático por WhatsApp:
+En Auralink Digital desarrollamos un sistema inteligente con placas NFC / QR de contacto directo:
 
 1. Cero fricción: El cliente toca la placa con su celular al pagar y en 3 segundos deja su reseña de 5 estrellas.
-2. Protección de reputación: Filtra opiniones negativas de forma privada antes de que lleguen a su perfil público.
-3. Dominio local: Supera a su competencia local en el mapa en tiempo récord.
+2. Dominio local: Supera a su competencia local en el mapa en tiempo récord.
 
 🔥 Oferta exclusiva para la zona: Solo estamos activando 5 placas piloto esta semana para negocios verificados en ${zone} con condiciones especiales.
 
