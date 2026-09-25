@@ -19,16 +19,18 @@ if (!value) {
   process.exit(1);
 }
 
-function vercel(args, input) {
-  const result = spawnSync("vercel", args, { input, stdio: [input ? "pipe" : "ignore", "inherit", "inherit"], shell: true });
+// On Windows `vercel` is a .cmd shim, which only runs through a shell. Commands
+// are passed as one fixed string (no args array) so nothing needs escaping.
+function vercel(command, input) {
+  const result = spawnSync(`vercel ${command}`, { input, stdio: [input ? "pipe" : "ignore", "inherit", "inherit"], shell: true });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-vercel(["env", "add", NAME, "production", "--sensitive", "--force"], value);
+vercel(`env add ${NAME} production --sensitive --force`, value);
 console.log(`${NAME} set in Vercel Production.`);
 
 if (process.argv.includes("--deploy")) {
-  vercel(["deploy", "--prod"]);
+  vercel("deploy --prod");
 } else {
   console.log("Redeploy for it to take effect: vercel deploy --prod (or push to main).");
 }
