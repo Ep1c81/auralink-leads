@@ -81,15 +81,22 @@ export function checkAutomationAuth(request: Request): NextResponse | null {
   return null;
 }
 
-/** Reads `limit`, `dry_run` and `mobile_only` from the query string. */
+/**
+ * Reads `limit`, `dry_run` and `mobile_only` from the query string.
+ * mobile_only defaults to on (landlines rarely have WhatsApp); pass
+ * `mobile_only=0` to include them.
+ */
 export function parseDispatchOptions(request: Request): DispatchOptions {
   const params = new URL(request.url).searchParams;
   const rawLimit = Number.parseInt(params.get("limit") ?? "", 10);
   const limit = Number.isFinite(rawLimit)
     ? Math.min(Math.max(rawLimit, 1), MAX_BATCH_SIZE)
     : DEFAULT_BATCH_SIZE;
-  const flag = (name: string) => ["1", "true"].includes(params.get(name) ?? "");
-  return { limit, dryRun: flag("dry_run"), mobileOnly: flag("mobile_only") };
+  const flag = (name: string, fallback: boolean) => {
+    const value = params.get(name);
+    return value === null ? fallback : ["1", "true"].includes(value);
+  };
+  return { limit, dryRun: flag("dry_run", false), mobileOnly: flag("mobile_only", true) };
 }
 
 function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem {

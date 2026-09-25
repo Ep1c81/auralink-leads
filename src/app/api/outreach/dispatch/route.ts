@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
  * "Pitch Sent". Requires `Authorization: Bearer <OUTREACH_AUTOMATION_SECRET>`.
  *
  * Query params: limit (default 25, max 100), dry_run=1 (return the payload
- * without sending or updating anything), mobile_only=1 (skip landlines).
+ * without sending or updating anything), mobile_only=0 (also send to
+ * landlines; by default only mobile numbers are sent).
  */
 function handle(request: Request) {
   return handleDispatchRequest(request, dispatchPitches, "/api/outreach/dispatch");
