@@ -62,13 +62,16 @@ export function buildOutreachMessage({
 
 function buildFollowUpMessage(businessName?: string | null): string {
   const name = businessName?.trim() || "su negocio";
-  return `Hola, equipo de ${name}. 👋
+  return `Estimado/a ${name},
 
-Le escribí hace unos días sobre cómo eliminar la fricción que tienen sus clientes para dejarles reseñas de 5 estrellas en Google Maps.
+Le escribimos hace unos días desde BizMapShield sobre cómo ayudar a su negocio a destacar en Google Maps y multiplicar sus reseñas de 5 estrellas.
 
-Sabemos que los clientes quedan encantados con su servicio, pero la mayoría simplemente olvida dejar la opinión si el proceso no es instantáneo.
+Sabemos que su agenda es muy ocupada, así que queríamos dar seguimiento por si el mensaje anterior se le pasó.
 
-¿Pudo ver el mensaje anterior, o prefiere que le envíe el video corto de 20 segundos por acá?`.normalize("NFC");
+Si le interesa, con gusto le mostramos en una demostración breve y sin compromiso cómo funciona. Puede responder directamente a este mensaje o escribirnos a nuestro correo oficial: premium@auralinkdigital.com
+
+Cordialmente,
+Equipo AuralinkDigital 🇨🇷`.normalize("NFC");
 }
 
 function buildPitchMessage(businessName?: string | null, canton?: string | null): string {
