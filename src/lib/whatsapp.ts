@@ -74,27 +74,25 @@ Sabemos que los clientes quedan encantados con su servicio, pero la mayoría sim
 function buildPitchMessage(businessName?: string | null, canton?: string | null): string {
   const name = businessName?.trim() || "su negocio";
   const zone = canton?.trim() || "la zona";
-  // "en la zona de la zona" is nonsense, so the fallback drops the "de".
-  const inZoneOf = canton?.trim() ? `en la zona de ${zone}` : "en la zona";
 
-  return `🚨 ¿Cuántos clientes perdió hoy en ${name} por no aparecer de primero en Google Maps?
+  return `Estimado/a ${name},
 
-Hola, equipo de ${name}. Un gusto saludarle.
+Le escribimos desde BizMapShield, la solución costarricense que ayuda a negocios locales como el suyo en ${zone} a destacar en Google Maps y multiplicar sus reseñas de 5 estrellas.
 
-Estaba revisando las búsquedas locales ${inZoneOf} y noté algo crítico:
+Sabemos que su reputación es su activo más valioso. Nuestro sistema convierte cada visita en una reseña automática, sin que usted tenga que pedir nada.
 
-Su negocio tiene un excelente servicio, pero sus competidores más cercanos se están llevando a los clientes listos para pagar solo porque tienen más opiniones de 5 estrellas acumuladas en Google Maps.
+Si desea conocer más sobre cómo podemos ayudarle a dominar su zona, puede:
 
-Si no está capturando esas reseñas en el momento exacto en que sus clientes están satisfechos, está dejando ingresos sobre la mesa todos los meses.
+💬 Responder directamente a este mensaje
+✉️ Escribirnos a nuestro correo oficial: premium@auralinkdigital.com
+🌐 Visitarnos en:
+   • bizmapshield.vercel.app
+   • auralinkdigital.com
 
-En Auralink Digital desarrollamos un sistema inteligente con placas NFC / QR de contacto directo:
+Estamos a su disposición para una demostración sin compromiso.
 
-1. Cero fricción: El cliente toca la placa con su celular al pagar y en 3 segundos deja su reseña de 5 estrellas.
-2. Dominio local: Supera a su competencia local en el mapa en tiempo récord.
-
-🔥 Oferta exclusiva para la zona: Solo estamos activando 5 placas piloto esta semana para negocios verificados en ${zone} con condiciones especiales.
-
-Sin compromiso alguno, ¿le parecería bien si le comparto un video corto de 20 segundos para que vea cómo funciona en vivo?`.normalize("NFC");
+Cordialmente,
+Equipo AuralinkDigital 🇨🇷`.normalize("NFC");
 }
 
 // Not wa.me: its redirect to api.whatsapp.com mangles 4-byte UTF-8 (emoji
