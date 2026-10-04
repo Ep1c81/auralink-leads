@@ -10,12 +10,22 @@ import { buildOutreachMessage, cantonFromAddress, type OutreachStage } from "@/l
  *
  *   Queued -> Pitch Sent -> Followup Sent
  *        any -> Replied (via /api/webhooks/make-reply)
+ *   in sequence -> No WhatsApp (mobile|landline) (via /api/webhooks/make-send-failed)
  *
  * "Sent" here means Make accepted the batch (2xx), not that WhatsApp
  * delivered it — Make's webhook acknowledges before the scenario runs.
  */
 
-export type BizmapOutreachStatus = "Queued" | "Pitch Sent" | "Followup Sent" | "Replied" | "Closed";
+export type BizmapOutreachStatus =
+  | "Queued"
+  | "Pitch Sent"
+  | "Followup Sent"
+  | "Replied"
+  | "Closed"
+  | "No WhatsApp (landline)"
+  | "No WhatsApp (mobile)"
+  | "Invalid Number"
+  | "Wrong Business";
 
 export type SequenceStage = "pitch_1" | "followup_2";
 
@@ -212,7 +222,10 @@ async function dedupeByPhone(leads: BizmapLeadRow[], dryRun: boolean) {
     .from("bizmap_leads")
     .select("wa_phone")
     .in("wa_phone", phones)
-    .in("outreach_status", ["Pitch Sent", "Followup Sent", "Replied", "Closed"]);
+    .in("outreach_status", [
+      "Pitch Sent", "Followup Sent", "Replied", "Closed",
+      "No WhatsApp (landline)", "No WhatsApp (mobile)", "Invalid Number", "Wrong Business",
+    ]);
   if (error) throw new Error(`Failed to check contacted numbers: ${error.message}`);
 
   const seen = new Set((contacted ?? []).map((r) => r.wa_phone as string));
