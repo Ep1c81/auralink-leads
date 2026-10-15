@@ -1,6 +1,19 @@
 import requests
 import json
 
+# Placeholder values the scraper writes when OSM has no phone tag.
+MISSING_PHONE_VALUES = {"", "n/a", "na", "none", "null"}
+
+def has_phone(lead):
+    phone = lead.get("phone_number")
+    return isinstance(phone, str) and phone.strip().lower() not in MISSING_PHONE_VALUES
+
+def drop_leads_without_phone(leads):
+    """
+    Drops leads whose phone number is missing, blank, or a placeholder like "N/A".
+    """
+    return [lead for lead in leads if has_phone(lead)]
+
 def discover_leads_gam():
     """
     Queries OpenStreetMap for a massive variety of SMBs across the entire Costa Rican GAM.
@@ -68,8 +81,10 @@ def save_to_json(data, filename="leads.json"):
     print(f"\nSuccessfully saved {len(data)} REAL leads to {filename}")
 
 if __name__ == "__main__":
-    extracted_leads = discover_leads_gam()
-    
+    scraped_leads = discover_leads_gam()
+    extracted_leads = drop_leads_without_phone(scraped_leads)
+    print(f"Dropped {len(scraped_leads) - len(extracted_leads)} leads with no phone number; {len(extracted_leads)} remain.")
+
     if extracted_leads:
         save_to_json(extracted_leads)
         print("\nSample Real Lead Extracted:")

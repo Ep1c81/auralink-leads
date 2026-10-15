@@ -5,6 +5,8 @@ import sys
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+from discovery_engine_osm import drop_leads_without_phone
+
 load_dotenv(".env.local")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -31,11 +33,31 @@ def push_to_supabase(json_file_path="leads.json"):
 
     print(f"Found {len(leads_data)} leads in {json_file_path}.")
 
+    # Only leads with a usable phone number go to bizmap_leads; a leads.json
+    # from an older run may still contain "N/A" or blank phones.
+    cleaned = drop_leads_without_phone(leads_data)
+    print(f"Dropped {len(leads_data) - len(cleaned)} leads with no phone number.")
+    leads_data = cleaned
+
     # bizmap_leads has no unique constraint, and a prior migration already had
     # to purge ~16k exact-duplicate rows from earlier scraper runs. Dedupe
     # against what's already in the table before inserting anything new.
-    existing = supabase.table("bizmap_leads").select(",".join(DEDUPE_COLUMNS)).execute()
-    existing_keys = {tuple(row.get(col) for col in DEDUPE_COLUMNS) for row in existing.data}
+    # PostgREST caps a single select at 1000 rows, so page through the table.
+    existing_keys = set()
+    page_size = 1000
+    offset = 0
+    while True:
+        page = (
+            supabase.table("bizmap_leads")
+            .select(",".join(DEDUPE_COLUMNS))
+            .order("id")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        existing_keys.update(tuple(row.get(col) for col in DEDUPE_COLUMNS) for row in page.data)
+        if len(page.data) < page_size:
+            break
+        offset += page_size
     print(f"Found {len(existing_keys)} existing rows in bizmap_leads for dedupe.")
 
     new_rows = []
