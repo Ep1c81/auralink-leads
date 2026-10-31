@@ -1,50 +1,45 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import type { BantQualification, Lead, OutreachContent, WebEnrichment } from "@/lib/types";
-
-const GEMINI_MODEL = "gemini-3.6-flash";
-
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const DEFAULT_OFFERING =
   "helping local Costa Rican businesses grow through WhatsApp-based customer engagement, better online visibility, and simple digital tools";
 
-const outreachResponseSchema = {
-  type: Type.OBJECT,
-  properties: {
-    whatsapp_pitch: {
-      type: Type.STRING,
-      description:
-        "Short, friendly WhatsApp message in Spanish, mobile-first, with a clear call to action",
+/**
+ * Structured output via tool use. Forced tool_choice ({type:"tool"}) is
+ * rejected with a 400 on claude-sonnet-5-5, so the model is steered to this
+ * tool with tool_choice "auto" + a prompt instruction, and `strict` keeps the
+ * input schema-valid.
+ */
+const submitOutreachTool: Anthropic.Tool = {
+  name: "submit_outreach",
+  description: "Submit the generated Spanish outreach copy for this lead.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      whatsapp_pitch: {
+        type: "string",
+        description:
+          "Short, friendly WhatsApp message in Spanish, mobile-first, with a clear call to action",
+      },
+      email_subject: { type: "string" },
+      email_body: {
+        type: "string",
+        description: "Professional but warm outreach email in Spanish",
+      },
     },
-    email_subject: { type: Type.STRING },
-    email_body: {
-      type: Type.STRING,
-      description: "Professional but warm outreach email in Spanish",
-    },
+    required: ["whatsapp_pitch", "email_subject", "email_body"],
+    additionalProperties: false,
   },
-  required: ["whatsapp_pitch", "email_subject", "email_body"],
 };
 
 /**
- * Gemini's responseMimeType:"application/json" is supposed to return raw
- * JSON, but it sometimes still wraps the payload in a ```json ... ``` (or
- * bare ```) markdown fence. Strip that before JSON.parse.
- */
-function stripMarkdownFence(text: string): string {
-  return text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-}
-
-/**
- * Deterministic Spanish outreach copy used whenever Gemini generation
+ * Deterministic Spanish outreach copy used whenever Claude generation
  * fails (rate limit, malformed response, network error, etc.) so the
  * outreach modal always has clean, presentable content to show. Kept
  * fully in Spanish — OUTREACH_OFFERING_DESCRIPTION is written in English
- * for the Gemini prompt, so it is deliberately not spliced in here.
+ * for the Claude prompt, so it is deliberately not spliced in here.
  * `offeringEsOverride` lets a caller (e.g. the auto-prospect sweep) swap in
  * campaign-specific Spanish copy instead of the generic default.
  */
@@ -92,20 +87,22 @@ Write in Spanish (Costa Rican tone — friendly but professional, using "usted")
 2. An email subject line (concise, specific, not spammy).
 3. A slightly longer, professional outreach email body (3-4 short paragraphs) that expands on the value proposition, references their business category, and ends with a clear call to action.
 
-Do not invent specific facts about the business you don't have (e.g. don't claim to know their revenue or exact problems) — keep it relevant to their industry but general otherwise.`;
+Do not invent specific facts about the business you don't have (e.g. don't claim to know their revenue or exact problems) — keep it relevant to their industry but general otherwise.
+
+Submit the result by calling the submit_outreach tool.`;
 }
 
 export interface OutreachOfferingOptions {
-  /** English offering description spliced into the Gemini prompt, overriding
+  /** English offering description spliced into the Claude prompt, overriding
    *  OUTREACH_OFFERING_DESCRIPTION / DEFAULT_OFFERING for this call only. */
   offering?: string;
   /** Spanish offering phrase used in the deterministic fallback copy if
-   *  Gemini generation fails, overriding the generic default for this call. */
+   *  Claude generation fails, overriding the generic default for this call. */
   fallbackOfferingEs?: string;
 }
 
 /**
- * Generates outreach copy via Gemini. Never throws — a failed API call,
+ * Generates outreach copy via Claude. Never throws — a failed API call,
  * rate limit, or malformed response falls back to buildFallbackOutreach so
  * callers (and the outreach modal) always get clean, renderable content.
  */
@@ -113,27 +110,50 @@ export async function generateOutreach(
   lead: Lead,
   options?: OutreachOfferingOptions
 ): Promise<OutreachContent> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error(
+      `[outreach] ANTHROPIC_API_KEY is not set, using fallback for lead ${lead.id}`
+    );
+    return buildFallbackOutreach(lead, options?.fallbackOfferingEs);
+  }
+
   try {
-    const response = await genAI.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: buildOutreachPrompt(lead, options?.offering),
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: outreachResponseSchema,
-      },
+    const anthropic = new Anthropic({ apiKey });
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_OUTREACH_MODEL ?? "claude-sonnet-5-5",
+      max_tokens: 1024,
+      // Keep thinking short so it can't eat the 1024-token budget before the tool call.
+      output_config: { effort: "low" },
+      tools: [submitOutreachTool],
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      messages: [{ role: "user", content: buildOutreachPrompt(lead, options?.offering) }],
     });
 
-    const cleaned = stripMarkdownFence(response.text ?? "{}");
-    const parsed = JSON.parse(cleaned) as Partial<OutreachContent>;
-
-    if (!parsed.whatsapp_pitch || !parsed.email_subject || !parsed.email_body) {
-      throw new Error("Gemini response missing required outreach fields");
+    const toolUse = response.content.find(
+      (block): block is Anthropic.ToolUseBlock =>
+        block.type === "tool_use" && block.name === submitOutreachTool.name
+    );
+    if (!toolUse) {
+      throw new Error(
+        `Claude response has no submit_outreach call (stop_reason: ${response.stop_reason})`
+      );
     }
 
-    return parsed as OutreachContent;
+    const input = toolUse.input as Partial<Record<keyof OutreachContent, unknown>>;
+    const isFilled = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+    if (!isFilled(input.whatsapp_pitch) || !isFilled(input.email_subject) || !isFilled(input.email_body)) {
+      throw new Error("Claude response missing required outreach fields");
+    }
+
+    return {
+      whatsapp_pitch: input.whatsapp_pitch,
+      email_subject: input.email_subject,
+      email_body: input.email_body,
+    };
   } catch (err) {
     console.error(
-      `[outreach] Gemini generation failed for lead ${lead.id}, using fallback:`,
+      `[outreach] Claude generation failed for lead ${lead.id}, using fallback:`,
       err
     );
     return buildFallbackOutreach(lead, options?.fallbackOfferingEs);
