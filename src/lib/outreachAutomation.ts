@@ -48,6 +48,15 @@ const DEFAULT_BATCH_SIZE = 25;
 const MAX_BATCH_SIZE = 100;
 const FOLLOW_UP_AFTER_DAYS = 3;
 
+/**
+ * Pitches only go to leads scored at least this high (lead_score, 1-10, from
+ * discovery_engine_osm.py). 8-10 are businesses with no website. Override per
+ * request with `min_score`, or for every request with OUTREACH_MIN_LEAD_SCORE;
+ * 0 turns the filter off. Follow-ups ignore it: a lead already pitched always
+ * gets its follow-up.
+ */
+const DEFAULT_MIN_LEAD_SCORE = 8;
+
 // wa_phone is a generated column (format_wa_phone); only Costa Rican numbers
 // are eligible for automated sends. Mobile numbers start with 5-8; 2/4 are
 // landlines, which usually aren't on WhatsApp.
@@ -59,12 +68,19 @@ interface BizmapLeadRow {
   business_name: string | null;
   address: string | null;
   wa_phone: string | null;
+  lead_score: number | null;
 }
+
+const LEAD_COLUMNS = "id, business_name, address, wa_phone, lead_score";
 
 export interface DispatchItem {
   lead_id: string;
   phone: string;
   business_name: string;
+  /** 0-10; 0 means the lead was never scored. */
+  lead_score: number;
+  /** Status the lead had when it was picked; the send moves it to the next one. */
+  outreach_status: BizmapOutreachStatus;
   canton: string;
   /** "" when the address doesn't identify one (most leads are just "GAM"). */
   province: CrProvince | "";
@@ -78,11 +94,15 @@ export interface DispatchOptions {
   mobileOnly: boolean;
   /** When set, only these bizmap_leads ids are considered (still subject to the stage's status filter). */
   leadIds: string[] | null;
+  /** Lowest lead_score a pitch goes to (0-10, 0 = no filter). Not applied to follow-ups. */
+  minScore: number;
 }
 
 export interface DispatchResult {
   sequence_stage: SequenceStage;
   dry_run: boolean;
+  /** Score filter applied to this batch; null for follow-ups, which have none. */
+  min_score: number | null;
   dispatched: number;
   /** Rows dropped from the sequence because another row already covers their number. */
   skipped_duplicates: number;
@@ -113,11 +133,21 @@ export function checkAutomationAuth(request: Request): NextResponse | null {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function parseMinScore(raw: string | null | undefined, source: string): number | null {
+  if (raw === null || raw === undefined || raw.trim() === "") return null;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 0 || value > 10) {
+    throw new DispatchInputError(`${source} must be a whole number from 0 to 10`);
+  }
+  return value;
+}
+
 /**
- * Reads `limit`, `dry_run`, `mobile_only` and `lead_ids` from the query string.
- * mobile_only defaults to on (landlines rarely have WhatsApp); pass
- * `mobile_only=0` to include them. `lead_ids` is a comma-separated list of
- * bizmap_leads ids that narrows the batch to just those leads.
+ * Reads `limit`, `dry_run`, `mobile_only`, `lead_ids` and `min_score` from the
+ * query string. mobile_only defaults to on (landlines rarely have WhatsApp);
+ * pass `mobile_only=0` to include them. `lead_ids` is a comma-separated list
+ * of bizmap_leads ids that narrows the batch to just those leads. `min_score`
+ * defaults to OUTREACH_MIN_LEAD_SCORE, else DEFAULT_MIN_LEAD_SCORE.
  */
 export function parseDispatchOptions(request: Request): DispatchOptions {
   const params = new URL(request.url).searchParams;
@@ -143,8 +173,17 @@ export function parseDispatchOptions(request: Request): DispatchOptions {
       throw new DispatchInputError(`lead_ids accepts at most ${MAX_BATCH_SIZE} ids`);
     }
   }
-  return { limit, dryRun: flag("dry_run", false), mobileOnly: flag("mobile_only", true), leadIds };
+  const minScore =
+    parseMinScore(params.get("min_score"), "min_score") ??
+    parseMinScore(process.env.OUTREACH_MIN_LEAD_SCORE, "OUTREACH_MIN_LEAD_SCORE") ??
+    DEFAULT_MIN_LEAD_SCORE;
+  return { limit, dryRun: flag("dry_run", false), mobileOnly: flag("mobile_only", true), leadIds, minScore };
 }
+
+const STAGE_FROM_STATUS: Record<SequenceStage, BizmapOutreachStatus> = {
+  pitch_1: "Queued",
+  followup_2: "Pitch Sent",
+};
 
 function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem {
   const businessName = lead.business_name?.trim() || "";
@@ -153,6 +192,8 @@ function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem
     lead_id: lead.id,
     phone: `+${lead.wa_phone}`,
     business_name: businessName,
+    lead_score: lead.lead_score ?? 0,
+    outreach_status: STAGE_FROM_STATUS[stage],
     canton,
     province: provinceFromAddress(lead.address),
     message_text: buildOutreachMessage({ businessName, canton, stage: STAGE_TEMPLATE[stage] }),
@@ -192,6 +233,12 @@ export function validateDispatchItem(item: DispatchItem): string[] {
   if (!item.lead_id) errors.push("lead_id is empty");
   if (!/^\+506[0-9]{8}$/.test(item.phone)) errors.push(`phone "${item.phone}" is not +506 followed by 8 digits`);
   if (typeof item.business_name !== "string") errors.push("business_name is not a string");
+  if (!Number.isInteger(item.lead_score) || item.lead_score < 0 || item.lead_score > 10) {
+    errors.push(`lead_score ${item.lead_score} is not a whole number from 0 to 10`);
+  }
+  if (item.outreach_status !== STAGE_FROM_STATUS[item.sequence_stage]) {
+    errors.push(`outreach_status "${item.outreach_status}" does not match stage "${item.sequence_stage}"`);
+  }
   if (typeof item.canton !== "string") errors.push("canton is not a string");
   if (item.province !== "" && !isCrProvince(item.province)) {
     errors.push(`province "${item.province}" is not a Costa Rican province`);
@@ -290,17 +337,18 @@ async function markCampaignMessagesSent(stage: SequenceStage, items: DispatchIte
 }
 
 /**
- * Stage 1: sends the soft-CTA pitch to a batch of Queued leads and moves them
- * to "Pitch Sent". Not safe to run concurrently with itself — schedule a
- * single caller (one Make scenario).
+ * Stage 1: sends the soft-CTA pitch to a batch of Queued leads scored at least
+ * options.minScore and moves them to "Pitch Sent". Not safe to run
+ * concurrently with itself — schedule a single caller (one Make scenario).
  */
 export async function dispatchPitches(options: DispatchOptions): Promise<DispatchResult> {
   let query = getSupabase()
     .from("bizmap_leads")
-    .select("id, business_name, address, wa_phone")
+    .select(LEAD_COLUMNS)
     .eq("outreach_status", "Queued")
     .eq("has_replied", false)
     .filter("wa_phone", "match", options.mobileOnly ? CR_MOBILE_NUMBER : CR_NUMBER);
+  if (options.minScore > 0) query = query.gte("lead_score", options.minScore);
   if (options.leadIds) query = query.in("id", options.leadIds);
   const { data, error } = await query
     .order("lead_score", { ascending: false, nullsFirst: false })
@@ -319,7 +367,7 @@ export async function dispatchFollowUps(options: DispatchOptions): Promise<Dispa
   const cutoff = new Date(Date.now() - FOLLOW_UP_AFTER_DAYS * 24 * 60 * 60 * 1000).toISOString();
   let query = getSupabase()
     .from("bizmap_leads")
-    .select("id, business_name, address, wa_phone")
+    .select(LEAD_COLUMNS)
     .eq("outreach_status", "Pitch Sent")
     .eq("has_replied", false)
     .lt("last_contacted_at", cutoff)
@@ -373,6 +421,7 @@ async function sendBatch(
   return {
     sequence_stage: stage,
     dry_run: options.dryRun,
+    min_score: stage === "pitch_1" ? options.minScore : null,
     dispatched: items.length,
     skipped_duplicates: skipped,
     campaign_messages_marked: campaignMarked,

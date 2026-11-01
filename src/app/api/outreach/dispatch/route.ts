@@ -10,7 +10,9 @@ export const dynamic = "force-dynamic";
  * Query params: limit (default 25, max 100), dry_run=1 (return the payload
  * without sending or updating anything), mobile_only=0 (also send to
  * landlines; by default only mobile numbers are sent), lead_ids=<uuid>,<uuid>
- * (only send to these bizmap_leads; ids that aren't Queued are ignored).
+ * (only send to these bizmap_leads; ids that aren't Queued are ignored),
+ * min_score=0-10 (lowest lead_score pitched; defaults to
+ * OUTREACH_MIN_LEAD_SCORE, else 8; 0 sends regardless of score).
  */
 function handle(request: Request) {
   return handleDispatchRequest(request, dispatchPitches, "/api/outreach/dispatch");
