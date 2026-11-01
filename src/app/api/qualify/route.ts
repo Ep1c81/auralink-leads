@@ -8,9 +8,9 @@ import { generateAndSaveOutreach } from "@/lib/outreach";
 import { withDeadline } from "@/lib/timeout";
 import type { Lead, OutreachContent } from "@/lib/types";
 
-// Bounds the Gemini call. Left with ~1s of headroom under the 5s response
+// Bounds the Claude call. Left with ~1s of headroom under the 5s response
 // guarantee for the instant heuristic fallback below, which does no
-// Gemini/network calls and only a couple of fast Supabase round trips.
+// Claude/network calls and only a couple of fast Supabase round trips.
 const PIPELINE_DEADLINE_MS = 4000;
 
 const DEFAULT_CITY = "Santa Ana, CR";
@@ -131,7 +131,7 @@ export async function POST(request: Request) {
 
   // Uses profile-based qualification with retry + heuristic fallback, bounded
   // by a hard deadline, so a qualify request never fails outright or hangs
-  // on a slow/erroring Gemini call — this always answers well within the 5s
+  // on a slow/erroring Claude call — this always answers well within the 5s
   // the frontend expects.
   let result: Awaited<ReturnType<typeof qualifyLeadProfile>>;
   try {

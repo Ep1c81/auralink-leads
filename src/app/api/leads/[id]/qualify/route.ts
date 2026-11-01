@@ -5,9 +5,9 @@ import { enrichAndSaveLead } from "@/lib/enrichment";
 import { withDeadline } from "@/lib/timeout";
 import type { BantQualification, Lead } from "@/lib/types";
 
-// Bounds the Gemini call + any enrichment together. Left with ~1s of
+// Bounds the Claude call + any enrichment together. Left with ~1s of
 // headroom under the 5s response guarantee for the instant heuristic
-// fallback below, which does no Gemini/network calls and only a couple of
+// fallback below, which does no Claude/network calls and only a couple of
 // fast Supabase round trips.
 const PIPELINE_DEADLINE_MS = 4000;
 
@@ -17,7 +17,7 @@ interface PipelineResult {
 }
 
 /**
- * Runs Gemini-backed BANT qualification against the lead's basic profile
+ * Runs Claude-backed BANT qualification against the lead's basic profile
  * metadata (name, phone, category/industry, city) — this never depends on
  * or waits for website enrichment. Only for a "qualified" result does it
  * then best-effort enrich from the lead's website; enrichment has its own
@@ -48,7 +48,7 @@ async function runQualifyPipeline(lead: Lead, signal: AbortSignal): Promise<Pipe
  * required), then best-effort enriches a "qualified" result from its
  * website.
  *
- * The whole pipeline is bounded by a deadline: if the Gemini call or the
+ * The whole pipeline is bounded by a deadline: if the Claude call or the
  * website scrape fails or doesn't resolve in time, we log it and complete
  * the request using the heuristic fallback engine instead of surfacing a
  * 500/504 network error to the client — guaranteeing a JSON response well

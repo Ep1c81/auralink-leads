@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { runAutoProspectSweep } from "@/lib/autoProspect";
 
 // This is a long-running background sweep (multi-niche discovery + one
-// Gemini qualification call + one Gemini outreach call per new lead, each
+// Claude qualification call + one Claude outreach call per new lead, each
 // with its own retry/backoff) rather than a snappy user-facing request, so
 // give it plenty of headroom on platforms that support extending the
 // default function timeout (e.g. Vercel).

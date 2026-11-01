@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { generateDraftMessage } from "@/lib/outreachCampaigns";
 
 /**
- * Generates a draft outreach email for a lead within a campaign via Gemini
+ * Generates a draft outreach email for a lead within a campaign via Claude
  * and persists it with status "draft". Returns the draft for the review UI —
  * never auto-transitions to "queued".
  */

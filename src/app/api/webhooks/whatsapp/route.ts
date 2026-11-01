@@ -132,7 +132,7 @@ export async function POST(request: Request) {
     await qualifyAndRecord(lead, text);
   } catch (err) {
     return NextResponse.json(
-      { error: "Gemini qualification failed", details: `${err}` },
+      { error: "Claude qualification failed", details: `${err}` },
       { status: 502 }
     );
   }
