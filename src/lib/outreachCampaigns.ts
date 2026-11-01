@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import type {
   BantQualification,
@@ -11,38 +11,33 @@ import type {
   OutreachMessageWithLead,
 } from "@/lib/types";
 
-const GEMINI_MODEL = "gemini-3.6-flash";
-
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 const DEFAULT_OFFERING =
   "helping local Costa Rican businesses grow through WhatsApp-based customer engagement, better online visibility, and simple digital tools";
 
-const coldEmailResponseSchema = {
-  type: Type.OBJECT,
-  properties: {
-    subject: { type: Type.STRING, description: "Concise, specific, non-spammy subject line" },
-    body: {
-      type: Type.STRING,
-      description:
-        "Short, specific cold outreach email in Spanish (Costa Rican tone, using \"usted\"), referencing only the real business data provided — no invented personalization, no generic template filler",
-    },
-  },
-  required: ["subject", "body"],
-};
-
 /**
- * Gemini's responseMimeType:"application/json" is supposed to return raw
- * JSON, but it sometimes still wraps the payload in a ```json ... ``` (or
- * bare ```) markdown fence. Strip that before JSON.parse.
+ * Structured output via tool use, same as outreach.ts: forced tool_choice is
+ * rejected with a 400 on claude-sonnet-5-5, so the model is steered to this
+ * tool with tool_choice "auto" + a prompt instruction, and `strict` keeps the
+ * input schema-valid.
  */
-function stripMarkdownFence(text: string): string {
-  return text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-}
+const submitColdEmailTool: Anthropic.Tool = {
+  name: "submit_cold_email",
+  description: "Submit the generated Spanish cold outreach email for this lead.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      subject: { type: "string", description: "Concise, specific, non-spammy subject line" },
+      body: {
+        type: "string",
+        description:
+          "Short, specific cold outreach email in Spanish (Costa Rican tone, using \"usted\"), referencing only the real business data provided — no invented personalization, no generic template filler",
+      },
+    },
+    required: ["subject", "body"],
+    additionalProperties: false,
+  },
+};
 
 function buildFallbackEmail(lead: Lead): { subject: string; body: string } {
   const businessName = lead.name ?? lead.company ?? "su negocio";
@@ -78,35 +73,54 @@ You are reaching out to a local small/medium business (SMB) in Costa Rica. Use O
 
 ${bantSummary}
 
-Write in Spanish (Costa Rican tone, professional but warm, using "usted"). Produce a concise, specific, non-templated cold email — 3-4 short paragraphs — that references only the real data above, states one clear value proposition tailored to this business category, and ends with a clear call to action. Also produce a concise, specific, non-spammy subject line.`;
+Write in Spanish (Costa Rican tone, professional but warm, using "usted"). Produce a concise, specific, non-templated cold email — 3-4 short paragraphs — that references only the real data above, states one clear value proposition tailored to this business category, and ends with a clear call to action. Also produce a concise, specific, non-spammy subject line.
+
+Submit the result by calling the submit_cold_email tool.`;
 }
 
 /**
- * Generates cold outreach email copy via Gemini for a single lead. Never
+ * Generates cold outreach email copy via Claude for a single lead. Never
  * throws — a failed API call, rate limit, or malformed response falls back
  * to deterministic Spanish copy so draft generation always succeeds.
  */
 async function generateColdEmail(lead: Lead): Promise<{ subject: string; body: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error(`[outreachCampaigns] ANTHROPIC_API_KEY is not set, using fallback for lead ${lead.id}`);
+    return buildFallbackEmail(lead);
+  }
+
   try {
-    const response = await genAI.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: buildColdEmailPrompt(lead),
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: coldEmailResponseSchema,
-      },
+    const anthropic = new Anthropic({ apiKey });
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_OUTREACH_MODEL ?? "claude-sonnet-5-5",
+      max_tokens: 1024,
+      // Keep thinking short so it can't eat the 1024-token budget before the tool call.
+      output_config: { effort: "low" },
+      tools: [submitColdEmailTool],
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      messages: [{ role: "user", content: buildColdEmailPrompt(lead) }],
     });
 
-    const cleaned = stripMarkdownFence(response.text ?? "{}");
-    const parsed = JSON.parse(cleaned) as Partial<{ subject: string; body: string }>;
-
-    if (!parsed.subject || !parsed.body) {
-      throw new Error("Gemini response missing required email fields");
+    const toolUse = response.content.find(
+      (block): block is Anthropic.ToolUseBlock =>
+        block.type === "tool_use" && block.name === submitColdEmailTool.name
+    );
+    if (!toolUse) {
+      throw new Error(
+        `Claude response has no submit_cold_email call (stop_reason: ${response.stop_reason})`
+      );
     }
 
-    return { subject: parsed.subject, body: parsed.body };
+    const input = toolUse.input as { subject?: unknown; body?: unknown };
+    const isFilled = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+    if (!isFilled(input.subject) || !isFilled(input.body)) {
+      throw new Error("Claude response missing required email fields");
+    }
+
+    return { subject: input.subject, body: input.body };
   } catch (err) {
-    console.error(`[outreachCampaigns] Gemini generation failed for lead ${lead.id}, using fallback:`, err);
+    console.error(`[outreachCampaigns] Claude generation failed for lead ${lead.id}, using fallback:`, err);
     return buildFallbackEmail(lead);
   }
 }
