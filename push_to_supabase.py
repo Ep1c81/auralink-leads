@@ -76,6 +76,9 @@ def push_to_supabase(json_file_path="leads.json"):
         print("Nothing new to upload.")
         return
 
+    # Rows are inserted as-is, so the AI lead_score that discovery_engine_osm.py
+    # writes into leads.json lands in bizmap_leads.lead_score (the column the
+    # dashboard sorts by). Unscored rows fall back to the column default of 0.
     batch_size = 500
     inserted = 0
     for i in range(0, len(new_rows), batch_size):
