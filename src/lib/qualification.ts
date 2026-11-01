@@ -1,21 +1,14 @@
-import { ApiError, GoogleGenAI, Type } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import { notifyLeadQualified } from "@/lib/notifications";
 import type { BantQualification, Lead, LeadConversation } from "@/lib/types";
-
-const GEMINI_MODEL = "gemini-3.6-flash";
-
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Batch qualification retries a 429 up to 3 times with exponential backoff
 // before giving up and falling back to a heuristic score.
 const RATE_LIMIT_RETRY_DELAYS_MS = [5000, 10000, 20000];
 
 function isRateLimitError(err: unknown): boolean {
-  if (err instanceof ApiError) {
-    return err.status === 429;
-  }
-  return err instanceof Error && /RESOURCE_EXHAUSTED|"code":\s*429/.test(err.message);
+  return err instanceof Anthropic.RateLimitError;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -29,61 +22,119 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-const bantResponseSchema = {
-  type: Type.OBJECT,
-  properties: {
-    budget: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.INTEGER, description: "0-10 confidence score" },
-        notes: { type: Type.STRING },
+/**
+ * Structured output via tool use, same as outreach.ts: forced tool_choice is
+ * rejected with a 400 on claude-sonnet-5-5, so the model is steered to this
+ * tool with tool_choice "auto" + a prompt instruction, and `strict` keeps the
+ * input schema-valid.
+ */
+const submitQualificationTool: Anthropic.Tool = {
+  name: "submit_bant_qualification",
+  description: "Submit the BANT qualification result for this lead.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      budget: {
+        type: "object",
+        properties: {
+          score: { type: "integer", description: "0-10 confidence score" },
+          notes: { type: "string" },
+        },
+        required: ["score", "notes"],
+        additionalProperties: false,
       },
-      required: ["score", "notes"],
-    },
-    authority: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.INTEGER, description: "0-10 confidence score" },
-        notes: { type: Type.STRING },
+      authority: {
+        type: "object",
+        properties: {
+          score: { type: "integer", description: "0-10 confidence score" },
+          notes: { type: "string" },
+        },
+        required: ["score", "notes"],
+        additionalProperties: false,
       },
-      required: ["score", "notes"],
-    },
-    need: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.INTEGER, description: "0-10 confidence score" },
-        notes: { type: Type.STRING },
+      need: {
+        type: "object",
+        properties: {
+          score: { type: "integer", description: "0-10 confidence score" },
+          notes: { type: "string" },
+        },
+        required: ["score", "notes"],
+        additionalProperties: false,
       },
-      required: ["score", "notes"],
-    },
-    timeline: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.INTEGER, description: "0-10 confidence score" },
-        notes: { type: Type.STRING },
+      timeline: {
+        type: "object",
+        properties: {
+          score: { type: "integer", description: "0-10 confidence score" },
+          notes: { type: "string" },
+        },
+        required: ["score", "notes"],
+        additionalProperties: false,
       },
-      required: ["score", "notes"],
+      overall_score: {
+        type: "integer",
+        description: "0-100 aggregate lead score",
+      },
+      status: {
+        type: "string",
+        enum: ["qualified", "unqualified", "needs_more_info"],
+      },
+      summary: { type: "string" },
     },
-    overall_score: {
-      type: Type.INTEGER,
-      description: "0-100 aggregate lead score",
-    },
-    status: {
-      type: Type.STRING,
-      enum: ["qualified", "unqualified", "needs_more_info"],
-    },
-    summary: { type: Type.STRING },
+    required: [
+      "budget",
+      "authority",
+      "need",
+      "timeline",
+      "overall_score",
+      "status",
+      "summary",
+    ],
+    additionalProperties: false,
   },
-  required: [
-    "budget",
-    "authority",
-    "need",
-    "timeline",
-    "overall_score",
-    "status",
-    "summary",
-  ],
 };
+
+/**
+ * Sends a qualification prompt to Claude and returns the submitted BANT
+ * result. Throws if ANTHROPIC_API_KEY is unset, the request fails, or no
+ * tool call comes back; callers decide whether to fall back. SDK retries
+ * are off so the 429 backoff below and the routes' deadlines stay in charge.
+ */
+async function requestQualification(
+  prompt: string,
+  model: string,
+  signal?: AbortSignal
+): Promise<BantQualification> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY is not set");
+  }
+
+  const anthropic = new Anthropic({ apiKey, maxRetries: 0 });
+  const response = await anthropic.messages.create(
+    {
+      model,
+      max_tokens: 1024,
+      output_config: { effort: "low" },
+      tools: [submitQualificationTool],
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      messages: [{ role: "user", content: prompt }],
+    },
+    { signal }
+  );
+
+  const toolUse = response.content.find(
+    (block): block is Anthropic.ToolUseBlock =>
+      block.type === "tool_use" && block.name === submitQualificationTool.name
+  );
+  if (!toolUse) {
+    throw new Error(
+      `Claude response has no submit_bant_qualification call (stop_reason: ${response.stop_reason})`
+    );
+  }
+
+  return toolUse.input as BantQualification;
+}
 
 function buildPrompt(lead: Pick<Lead, "name" | "company" | "email">, message: string) {
   return `You are a sales qualification assistant. Evaluate the following inbound lead against the BANT framework (Budget, Authority, Need, Timeline).
@@ -98,7 +149,9 @@ Inbound message:
 ${message}
 """
 
-For each BANT dimension, give a 0-10 confidence score and short supporting notes based only on evidence in the message. Then give an overall_score (0-100), a status ("qualified", "unqualified", or "needs_more_info"), and a one-paragraph summary explaining the qualification decision.`;
+For each BANT dimension, give a 0-10 confidence score and short supporting notes based only on evidence in the message. Then give an overall_score (0-100), a status ("qualified", "unqualified", or "needs_more_info"), and a one-paragraph summary explaining the qualification decision.
+
+Submit the result by calling the submit_bant_qualification tool.`;
 }
 
 function buildProfilePrompt(lead: Lead, contextNote?: string): string {
@@ -124,23 +177,19 @@ ${contextNote ? `\nAdditional targeting context: ${contextNote}` : ""}
 
 Since there is no direct inquiry, base your BANT confidence scores on reasonable, conservative inference for a small local business of this type and size: budget likelihood given the industry, authority (owners/operators of small local businesses typically hold direct purchasing authority), need (would a business like this plausibly benefit from more customers or a better digital presence), and timeline (assume unknown/moderate unless the profile suggests otherwise). Do not invent facts you don't have evidence for.
 
-For each BANT dimension, give a 0-10 confidence score and short supporting notes. Then give an overall_score (0-100), a status ("qualified", "unqualified", or "needs_more_info"), and a one-paragraph summary explaining the qualification decision.`;
+For each BANT dimension, give a 0-10 confidence score and one short sentence of supporting notes. Then give an overall_score (0-100), a status ("qualified", "unqualified", or "needs_more_info"), and a summary of at most two sentences explaining the qualification decision.
+
+Submit the result by calling the submit_bant_qualification tool.`;
 }
 
 export async function runBantQualification(
   lead: Pick<Lead, "name" | "company" | "email">,
   message: string
 ): Promise<BantQualification> {
-  const response = await genAI.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: buildPrompt(lead, message),
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: bantResponseSchema,
-    },
-  });
-
-  return JSON.parse(response.text ?? "{}") as BantQualification;
+  return requestQualification(
+    buildPrompt(lead, message),
+    process.env.ANTHROPIC_QUALIFICATION_MODEL ?? "claude-sonnet-5-5"
+  );
 }
 
 export async function runBantQualificationFromProfile(
@@ -148,21 +197,17 @@ export async function runBantQualificationFromProfile(
   contextNote?: string,
   signal?: AbortSignal
 ): Promise<BantQualification> {
-  const response = await genAI.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: buildProfilePrompt(lead, contextNote),
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: bantResponseSchema,
-      abortSignal: signal,
-    },
-  });
-
-  return JSON.parse(response.text ?? "{}") as BantQualification;
+  // Haiku + the profile prompt's shorter notes keep this under the qualify
+  // routes' 4s pipeline deadline; Sonnet measured 3.5-6.6s on the same prompt.
+  return requestQualification(
+    buildProfilePrompt(lead, contextNote),
+    process.env.ANTHROPIC_QUALIFICATION_PROFILE_MODEL ?? "claude-haiku-5-5",
+    signal
+  );
 }
 
 /**
- * Deterministic BANT estimate used when Gemini qualification is unavailable
+ * Deterministic BANT estimate used when Claude qualification is unavailable
  * (rate-limited past all retries, or otherwise erroring). Scores lean on
  * basic profile completeness — name, phone, website, address — rather than
  * any real assessment, and always comes back "needs_more_info" so it never
@@ -181,7 +226,7 @@ function computeHeuristicQualification(lead: Lead): BantQualification {
   return {
     budget: {
       score: 4,
-      notes: "Gemini qualification was unavailable — budget could not be estimated and defaults to a conservative baseline.",
+      notes: "Claude qualification was unavailable — budget could not be estimated and defaults to a conservative baseline.",
     },
     authority: {
       score: hasName ? (hasPhone ? 6 : 5) : 3,
@@ -201,7 +246,7 @@ function computeHeuristicQualification(lead: Lead): BantQualification {
     },
     overall_score: Math.min(100, 20 + signalCount * 10),
     status: "needs_more_info",
-    summary: `Automatic fallback qualification for ${lead.name ?? lead.company ?? "this lead"}: Gemini qualification was unavailable (rate limit exhausted or request failed), so this score was estimated from basic profile signals (${signalCount}/4 of name, phone, website, and address present). Flagged as needs_more_info pending a real AI qualification pass.`,
+    summary: `Automatic fallback qualification for ${lead.name ?? lead.company ?? "this lead"}: Claude qualification was unavailable (rate limit exhausted or request failed), so this score was estimated from basic profile signals (${signalCount}/4 of name, phone, website, and address present). Flagged as needs_more_info pending a real AI qualification pass.`,
   };
 }
 
@@ -246,7 +291,7 @@ export async function runBantQualificationFromProfileWithFallback(
   }
 
   console.error(
-    `[qualification] Gemini qualification failed or timed out for lead ${lead.id}, using heuristic fallback:`,
+    `[qualification] Claude qualification failed or timed out for lead ${lead.id}, using heuristic fallback:`,
     lastError
   );
   return { qualification: computeHeuristicQualification(lead), usedFallback: true };
@@ -357,9 +402,9 @@ export async function qualifyLeadProfile(
 }
 
 /**
- * Computes and persists a heuristic-only BANT estimate, bypassing Gemini
+ * Computes and persists a heuristic-only BANT estimate, bypassing Claude
  * entirely. Used by callers that enforce their own hard deadline (e.g. an
- * API route's timeout controller) when the Gemini-backed qualification flow
+ * API route's timeout controller) when the Claude-backed qualification flow
  * in qualifyLeadProfile doesn't resolve in time.
  */
 export async function qualifyLeadProfileHeuristic(lead: Lead): Promise<{
