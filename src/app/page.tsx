@@ -350,7 +350,7 @@ function OutreachModal({
 
         {loading && (
           <p className="mt-6 text-sm text-zinc-500 dark:text-zinc-400">
-            Generating outreach with Gemini...
+            Generating outreach with Claude...
           </p>
         )}
 
@@ -490,7 +490,7 @@ export default function Home() {
   // triggers a full /api/cron/auto-prospect sweep (discover -> import ->
   // qualify -> pre-generate outreach), waiting AUTO_PILOT_SWEEP_INTERVAL_MS
   // between completed sweeps so it processes new leads continuously without
-  // hammering the discovery/Gemini APIs back-to-back.
+  // hammering the discovery/Claude APIs back-to-back.
   useEffect(() => {
     if (!autoPilotEnabled) return;
 
