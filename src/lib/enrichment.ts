@@ -1,12 +1,11 @@
+import { safeFetch } from '@/lib/security/safeFetch';
 import { supabase } from "@/lib/supabase";
 import type { Lead, WebEnrichment } from "@/lib/types";
 
 // Kept strict: this runs inline in the qualify request path, which has its
 // own ~4s end-to-end budget, so a slow/unresponsive site must bail out well
 // before it could blow that deadline.
-const FETCH_TIMEOUT_MS = 3000;
 const MAX_HTML_CHARS = 500_000;
-const USER_AGENT = "prospect-lead-engine/1.0 (lead enrichment)";
 
 const SOCIAL_PATTERNS: Record<string, RegExp> = {
   facebook: /https?:\/\/(?:www\.)?facebook\.com\/[^\s"'<>]+/i,
@@ -57,19 +56,7 @@ export async function enrichFromWebsite(url: string): Promise<WebEnrichment> {
 
   try {
     const normalizedUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    let response: Response;
-    try {
-      response = await fetch(normalizedUrl, {
-        headers: { "User-Agent": USER_AGENT },
-        signal: controller.signal,
-        redirect: "follow",
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    const response = await safeFetch(normalizedUrl);
 
     if (!response.ok) {
       return {
@@ -90,7 +77,7 @@ export async function enrichFromWebsite(url: string): Promise<WebEnrichment> {
       fetchedAt,
     };
   } catch (err) {
-    console.error(`[enrichment] fetch failed for ${url}:`, err);
+    console.error("enrichment.ts: operación registrada");
     return {
       emails: [],
       socialLinks: {},
@@ -125,7 +112,7 @@ export async function enrichAndSaveLead(lead: Lead): Promise<Lead | null> {
     .single();
 
   if (error || !updatedLead) {
-    console.error(`[enrichment] failed to save enrichment for lead ${lead.id}:`, error);
+    console.error("enrichment.ts: operación registrada");
     return null;
   }
 

@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { deepEnrichLead } from "@/lib/deepEnrichment";
 
@@ -6,7 +7,7 @@ import { deepEnrichLead } from "@/lib/deepEnrichment";
  * contact paths) for email, phone, WhatsApp, Instagram, and Facebook, and
  * writes any newly-found data onto the lead's dedicated columns.
  */
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const body = await request.json().catch(() => null);
   const leadId = body?.lead_id;
   const websiteUrl = typeof body?.website_url === "string" ? body.website_url : null;
@@ -22,3 +23,5 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ lead });
 }
+
+export const POST = withOperator(handlePOST);

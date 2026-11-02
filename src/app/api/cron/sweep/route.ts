@@ -1,3 +1,4 @@
+import { withMachine } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { runAutoProspectSweep } from "@/lib/autoProspect";
 
@@ -45,10 +46,14 @@ async function handleCronRequest(request: Request) {
   return NextResponse.json(result);
 }
 
-export async function GET(request: Request) {
+async function guardedGET(request: Request) {
   return handleCronRequest(request);
 }
 
-export async function POST(request: Request) {
+async function guardedPOST(request: Request) {
   return handleCronRequest(request);
 }
+
+export const GET = withMachine(guardedGET,"CRON_SECRET","authorization","Bearer ");
+
+export const POST = withMachine(guardedPOST,"CRON_SECRET","authorization","Bearer ");

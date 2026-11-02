@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import {
   importDiscoveredBusinesses,
@@ -14,7 +15,7 @@ interface ProspectingPayload {
   lowRatingOnly?: boolean;
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   let payload: ProspectingPayload;
   try {
     payload = await request.json();
@@ -58,8 +59,8 @@ export async function POST(request: Request) {
       payload.industry,
       payload.location
     );
-  } catch (err) {
-    console.error("[prospecting] import failed:", err);
+  } catch {
+    console.error("route.ts: operación registrada");
     return NextResponse.json(
       { error: "Failed to import leads" },
       { status: 500 }
@@ -72,3 +73,5 @@ export async function POST(request: Request) {
     skipped: businesses.length - imported.length,
   });
 }
+
+export const POST = withOperator(handlePOST);

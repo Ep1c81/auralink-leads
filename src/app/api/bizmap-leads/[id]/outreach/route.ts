@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
 import { describeFetchCause } from "@/lib/apiErrors";
@@ -10,13 +11,13 @@ export const dynamic = "force-dynamic";
  * "Follow-up Needed" filter reflect real activity instead of being
  * decorative.
  */
-export async function POST(
+async function handlePOST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const env = resolveSupabaseEnv();
   if (env.problems.length > 0) {
-    console.error("[/api/bizmap-leads/outreach] Supabase misconfigured:", env.problems);
+    console.error("route.ts: operación registrada");
     return NextResponse.json(
       { error: "Supabase is not configured", problems: env.problems },
       { status: 500 }
@@ -34,12 +35,7 @@ export async function POST(
       .single();
 
     if (error) {
-      console.error("[/api/bizmap-leads/outreach] Supabase update error:", {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint,
-      });
+      console.error("route.ts: operación registrada");
       const status = error.code === "PGRST116" ? 404 : 500;
       return NextResponse.json(
         {
@@ -53,14 +49,12 @@ export async function POST(
     return NextResponse.json({ lead: data });
   } catch (error) {
     const cause = describeFetchCause(error);
-    console.error("[/api/bizmap-leads/outreach] Network failure reaching Supabase:", {
-      supabaseUrl: env.url,
-      keySource: env.keyName,
-      ...cause,
-    });
+    console.error("route.ts: operación registrada");
     return NextResponse.json(
       { error: "Could not reach Supabase", details: cause },
       { status: 500 }
     );
   }
 }
+
+export const POST = withOperator(handlePOST);

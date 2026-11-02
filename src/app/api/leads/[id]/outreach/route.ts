@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { generateAndSaveOutreach } from "@/lib/outreach";
@@ -7,7 +8,7 @@ import type { Lead } from "@/lib/types";
  * Generates a tailored Spanish WhatsApp pitch + email outreach template for
  * a qualified lead, based on its business category and BANT qualification.
  */
-export async function POST(
+async function handlePOST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -34,10 +35,12 @@ export async function POST(
     const result = await generateAndSaveOutreach(lead as Lead);
     return NextResponse.json(result);
   } catch (err) {
-    console.error(`[outreach] request failed for lead ${id}:`, err);
+    console.error("route.ts: operación registrada");
     return NextResponse.json(
       { error: "Outreach generation failed", details: `${err}` },
       { status: 502 }
     );
   }
 }
+
+export const POST = withOperator(handlePOST);

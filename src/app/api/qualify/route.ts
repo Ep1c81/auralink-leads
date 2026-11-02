@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
@@ -18,6 +18,7 @@ const DEFAULT_CONTEXT_PROMPT =
   "Local business target for Google review acceleration, physical NFC tap standees, and automated WhatsApp patient/customer booking.";
 
 interface QualifyPayload {
+  bizmap_lead_id?: string;
   lead_id?: string;
   name?: string;
   email?: string;
@@ -40,7 +41,7 @@ function buildAutoQualifyContextNote(lead: Lead): string {
   return `Business name: ${lead.name ?? lead.company ?? "unknown"}. Category: ${category}. City: ${DEFAULT_CITY}. ${DEFAULT_CONTEXT_PROMPT}`;
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   let payload: QualifyPayload;
   try {
     payload = await request.json();
@@ -50,7 +51,11 @@ export async function POST(request: Request) {
 
   let lead: Lead;
 
-  if (payload.lead_id) {
+  if (payload.bizmap_lead_id) {
+    const {data:promoted,error:promoteError}=await supabase.rpc('promote_bizmap',{p_id:payload.bizmap_lead_id});
+    if(promoteError || !promoted)return NextResponse.json({error:'No se pudo vincular el prospecto.'},{status:400});
+    lead=(Array.isArray(promoted)?promoted[0]:promoted) as Lead;
+  } else if (payload.lead_id) {
     const { data, error } = await supabase
       .from("leads")
       .select("*")
@@ -139,11 +144,8 @@ export async function POST(request: Request) {
       (signal) => qualifyLeadProfile(lead, contextNote, signal),
       PIPELINE_DEADLINE_MS
     );
-  } catch (err) {
-    console.error(
-      `[qualify] qualification failed or timed out for lead ${lead.id}, falling back to instant heuristic scoring:`,
-      err
-    );
+  } catch {
+    console.error("route.ts: operación registrada");
     try {
       result = await qualifyLeadProfileHeuristic(lead);
     } catch (fallbackErr) {
@@ -163,8 +165,8 @@ export async function POST(request: Request) {
       if (enriched) {
         finalLead = enriched;
       }
-    } catch (err) {
-      console.error(`[qualify] enrichment threw for lead ${lead.id}:`, err);
+    } catch {
+      console.error("route.ts: operación registrada");
     }
 
     if (payload.auto_qualify) {
@@ -179,16 +181,16 @@ export async function POST(request: Request) {
         if (deepEnriched) {
           finalLead = deepEnriched;
         }
-      } catch (err) {
-        console.error(`[qualify] deep enrichment threw for lead ${lead.id}:`, err);
+      } catch {
+        console.error("route.ts: operación registrada");
       }
 
       try {
         const outreachResult = await generateAndSaveOutreach(finalLead);
         finalLead = outreachResult.lead;
         outreach = outreachResult.outreach;
-      } catch (err) {
-        console.error(`[qualify] outreach generation threw for lead ${lead.id}:`, err);
+      } catch {
+        console.error("route.ts: operación registrada");
       }
     }
   }
@@ -199,3 +201,5 @@ export async function POST(request: Request) {
     outreach,
   });
 }
+
+export const POST = withOperator(handlePOST);

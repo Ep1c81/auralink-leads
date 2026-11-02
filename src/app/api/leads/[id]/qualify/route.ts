@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
@@ -34,8 +35,8 @@ async function runQualifyPipeline(lead: Lead, signal: AbortSignal): Promise<Pipe
       if (enriched) {
         finalLead = enriched;
       }
-    } catch (err) {
-      console.error(`[qualify] enrichment threw for lead ${lead.id}:`, err);
+    } catch {
+      console.error("route.ts: operación registrada");
     }
   }
 
@@ -54,7 +55,7 @@ async function runQualifyPipeline(lead: Lead, signal: AbortSignal): Promise<Pipe
  * 500/504 network error to the client — guaranteeing a JSON response well
  * within 5 seconds.
  */
-export async function POST(
+async function handlePOST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -76,11 +77,8 @@ export async function POST(
       (signal) => runQualifyPipeline(lead as Lead, signal),
       PIPELINE_DEADLINE_MS
     );
-  } catch (err) {
-    console.error(
-      `[qualify] qualification pipeline failed or timed out for lead ${id}, falling back to instant heuristic scoring:`,
-      err
-    );
+  } catch {
+    console.error("route.ts: operación registrada");
     try {
       result = await qualifyLeadProfileHeuristic(lead as Lead);
     } catch (fallbackErr) {
@@ -96,3 +94,5 @@ export async function POST(
     qualification: result.qualification,
   });
 }
+
+export const POST = withOperator(handlePOST);
