@@ -69,7 +69,7 @@ export function MessageReviewPanel({
     }
     setQueuing(true);
     try {
-      const res = await fetch(`/api/outreach/messages/${message.id}/queue`, { method: "POST" });
+      const res = await fetch(`/api/outreach/messages/${message.id}/queue`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({subject,body,phone:message.lead?.phone??""}) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to queue message");
       onUpdated({ ...message, ...data.message });
@@ -88,7 +88,7 @@ export function MessageReviewPanel({
         <div>
           <h2 className={panelTitle}>{leadLabel}</h2>
           <div className="mt-1.5">
-            <StatusBadge kind="message" status={message.status} />
+            <StatusBadge kind="message" status={message.status} /><p className="text-sm">Destinatario: {message.lead?.phone ?? "Falta teléfono"}</p>
           </div>
         </div>
         <button
@@ -116,7 +116,7 @@ export function MessageReviewPanel({
             id="review-subject"
             type="text"
             value={subject}
-            disabled={!isDraft}
+            disabled={!isDraft||saving||queuing}
             onChange={(e) => setSubject(e.target.value)}
             className={input}
           />
@@ -129,7 +129,7 @@ export function MessageReviewPanel({
           <textarea
             id="review-body"
             value={body}
-            disabled={!isDraft}
+            disabled={!isDraft||saving||queuing}
             onChange={(e) => setBody(e.target.value)}
             rows={14}
             className={textarea}
@@ -143,8 +143,7 @@ export function MessageReviewPanel({
       {isDraft && (
         <div className="flex flex-col gap-2 border-t border-white/10 px-4 py-4">
           <p className={meta}>
-            Approving queues this email for delivery via the configured outreach webhook. Review
-            it carefully — this is the last step before it goes out.
+            Se enviará por WhatsApp al teléfono mostrado, únicamente con permiso registrado. La aprobación conserva este texto exacto y lo pone en la cola; no acredita entrega.
           </p>
           <div className="flex gap-2">
             <button
@@ -153,7 +152,7 @@ export function MessageReviewPanel({
               disabled={saving || queuing || !dirty}
               className={secondaryButton}
             >
-              {saving ? "Saving..." : "Save changes"}
+              {saving ? "Guardando…" : "Guardar cambios"}
             </button>
             <button
               type="button"
@@ -161,7 +160,7 @@ export function MessageReviewPanel({
               disabled={saving || queuing}
               className={`flex-1 ${successButton}`}
             >
-              {queuing ? "Queuing..." : "Approve & queue"}
+              {queuing ? "Aprobando…" : "Aprobar y poner en cola"}
             </button>
           </div>
         </div>

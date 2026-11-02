@@ -1,141 +1,41 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { qualifyAndRecord } from "@/lib/qualification";
-import type { Lead } from "@/lib/types";
-
-interface WhatsAppMessage {
-  from: string;
-  id: string;
-  timestamp: string;
-  type: string;
-  text?: { body: string };
+import { createHash } from 'node:crypto';
+import { getSupabase } from '@/lib/supabase';
+import { readBody, sameSecret, validMetaSignature } from '@/lib/security/policy';
+import { failure } from '@/lib/security/auth';
+export async function GET(request: Request) {
+  const p = new URL(request.url).searchParams;
+  if (p.get('hub.mode') === 'subscribe' && sameSecret(p.get('hub.verify_token'), process.env.WHATSAPP_VERIFY_TOKEN)) return new Response(p.get('hub.challenge') ?? '');
+  return failure(403, 'Verificación inválida.');
 }
-
-interface WhatsAppWebhookPayload {
-  object?: string;
-  entry?: Array<{
-    id: string;
-    changes: Array<{
-      field: string;
-      value: {
-        contacts?: Array<{ profile?: { name?: string }; wa_id?: string }>;
-        messages?: WhatsAppMessage[];
-      };
-    }>;
-  }>;
-}
-
-// Meta webhook verification handshake:
-// https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests
-export async function GET(request: NextRequest) {
-  const params = request.nextUrl.searchParams;
-  const mode = params.get("hub.mode");
-  const token = params.get("hub.verify_token");
-  const challenge = params.get("hub.challenge");
-
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    return new Response(challenge ?? "", { status: 200 });
-  }
-
-  return new Response("Forbidden", { status: 403 });
-}
-
 export async function POST(request: Request) {
-  let payload: WhatsAppWebhookPayload;
   try {
-    payload = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const value = payload.entry?.[0]?.changes?.[0]?.value;
-  const message = value?.messages?.[0];
-
-  // Non-text events (delivery/read receipts, media, etc.) - ack and skip.
-  if (!message || message.type !== "text" || !message.text?.body) {
-    return NextResponse.json({ status: "ignored" });
-  }
-
-  const from = message.from;
-  const text = message.text.body;
-  const contactName = value?.contacts?.find((c) => c.wa_id === from)?.profile
-    ?.name;
-
-  let lead: Lead;
-  const { data: existing } = await supabase
-    .from("leads")
-    .select("*")
-    .eq("phone", from)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (existing) {
-    lead = existing as Lead;
-  } else {
-    const { data: created, error: createError } = await supabase
-      .from("leads")
-      .insert({ name: contactName, phone: from, status: "new" })
-      .select()
-      .single();
-
-    if (createError || !created) {
-      // 23505 = Postgres unique_violation. `leads` has a composite UNIQUE
-      // (name, company) constraint; a redelivered/concurrent webhook for the
-      // same contact can race past the `existing`-by-phone lookup above and
-      // collide here. Meta retries webhook deliveries, so recover by
-      // looking the lead back up instead of dropping the inbound message.
-      if (createError?.code === "23505") {
-        const { data: recovered } = await supabase
-          .from("leads")
-          .select("*")
-          .eq("phone", from)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (!recovered) {
-          return NextResponse.json(
-            { error: "Failed to create lead" },
-            { status: 500 }
-          );
+    const raw = await readBody(request, 1048576);
+    if (!validMetaSignature(raw, request.headers.get('x-hub-signature-256'), process.env.META_APP_SECRET)) return failure(401, 'Firma inválida.');
+    const payload = JSON.parse(Buffer.from(raw).toString());
+    if (payload.object !== 'whatsapp_business_account' || !Array.isArray(payload.entry)) return failure(400, 'Evento inválido.');
+    const events = [];
+    for (const entry of payload.entry) {
+      if (!Array.isArray(entry.changes)) return failure(400, 'Evento inválido.');
+      for (const change of entry.changes) {
+        for (const kind of ['messages', 'statuses'] as const) {
+          if (change.value?.[kind] !== undefined && !Array.isArray(change.value[kind])) return failure(400, 'Evento inválido.');
+          for (const event of change.value?.[kind] ?? []) {
+            if (typeof event.id !== 'string' || !event.id.length || event.id.length > 512) return failure(400, 'Identificador inválido.');
+            if(kind==='messages' && (typeof event.from!=='string' || !/^[0-9]{7,15}$/.test(event.from) || typeof event.type!=='string'))return failure(400,'Remitente inválido.');
+            if(kind==='statuses' && (typeof event.status!=='string'||typeof event.timestamp!=='string'))return failure(400,'Estado inválido.');
+            const eventId = kind === 'messages' ? event.id : `${event.id}:${event.status}:${event.timestamp}`;
+            events.push({ provider: 'meta', event_id: eventId, kind, payload: event });
+          }
         }
-        lead = recovered as Lead;
-      } else {
-        return NextResponse.json(
-          { error: "Failed to create lead" },
-          { status: 500 }
-        );
+        // Conserva otros eventos sin efectos automáticos.
+        if (!change.value?.messages && !change.value?.statuses) events.push({ provider: 'meta', event_id: createHash('sha256').update(JSON.stringify(change)).digest('hex'), kind: 'other', payload: change });
       }
-    } else {
-      lead = created as Lead;
     }
-  }
-
-  const { error: inboundError } = await supabase
-    .from("lead_conversations")
-    .insert({
-      lead_id: lead.id,
-      sender: `whatsapp:${from}`,
-      message: text,
-      metadata: { whatsapp_message_id: message.id, timestamp: message.timestamp },
-    });
-
-  if (inboundError) {
-    return NextResponse.json(
-      { error: "Failed to store inbound message" },
-      { status: 500 }
-    );
-  }
-
-  try {
-    await qualifyAndRecord(lead, text);
-  } catch (err) {
-    return NextResponse.json(
-      { error: "Claude qualification failed", details: `${err}` },
-      { status: 502 }
-    );
-  }
-
-  return NextResponse.json({ status: "ok" });
+    if (events.length > 1000) return failure(413, 'Demasiados eventos.');
+    if (events.length) {
+      const { error } = await getSupabase().from('integration_inbox').upsert(events, { onConflict: 'provider,event_id', ignoreDuplicates: true });
+      if (error) return failure(503, 'No se pudo guardar el evento.');
+    }
+    return Response.json({ ok: true });
+  } catch { return failure(400, 'No se pudo procesar el evento.'); }
 }

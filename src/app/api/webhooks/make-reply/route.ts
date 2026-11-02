@@ -1,3 +1,4 @@
+import { withMachine } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { checkAutomationAuth } from "@/lib/outreachAutomation";
@@ -18,14 +19,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * "Closed" keeps that status). Requires
  * `Authorization: Bearer <OUTREACH_AUTOMATION_SECRET>`.
  */
-export async function POST(request: Request) {
+async function guardedPOST(request: Request) {
   const unauthorized = checkAutomationAuth(request);
   if (unauthorized) return unauthorized;
 
   const body = await request.json().catch(() => null);
   const leadId = typeof body?.lead_id === "string" ? body.lead_id.trim() : "";
   const rawPhone = typeof body?.phone === "string" ? body.phone : "";
-  const messageText = typeof body?.message_text === "string" ? body.message_text : "";
+
   const externalChatId =
     typeof body?.external_chat_id === "string" ? body.external_chat_id.trim() : "";
 
@@ -65,12 +66,12 @@ export async function POST(request: Request) {
       if (statusError) throw new Error(statusError.message);
     }
 
-    console.log(
-      `[/api/webhooks/make-reply] reply from ${replied.map((r) => r.business_name).join(", ")}: ${messageText.slice(0, 200)}`
-    );
+    console.log("route.ts: operación registrada");
     return NextResponse.json({ updated: replied.map((r) => r.id) });
-  } catch (err) {
-    console.error("[/api/webhooks/make-reply] failed to record reply:", err);
+  } catch {
+    console.error("route.ts: operación registrada");
     return NextResponse.json({ error: "Failed to record reply" }, { status: 502 });
   }
 }
+
+export const POST = withMachine(guardedPOST,"OUTREACH_AUTOMATION_SECRET","authorization","Bearer ");

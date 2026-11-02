@@ -1,3 +1,4 @@
+import { withMachine } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { applyInboundStatus } from "@/lib/outreachCampaigns";
 import type { OutreachMessageStatus } from "@/lib/types";
@@ -9,10 +10,10 @@ const VALID_STATUSES: OutreachMessageStatus[] = ["sent", "failed", "bounced"];
  * provider_message_id. Requires a shared-secret header (OUTREACH_STATUS_SECRET)
  * — requests without a matching header are rejected before touching the DB.
  */
-export async function POST(request: Request) {
+async function guardedPOST(request: Request) {
   const expectedSecret = process.env.OUTREACH_STATUS_SECRET;
   if (!expectedSecret) {
-    console.error("[outreach-status] OUTREACH_STATUS_SECRET not configured; rejecting request");
+    console.error("route.ts: operación registrada");
     return NextResponse.json({ error: "Endpoint not configured" }, { status: 503 });
   }
 
@@ -37,8 +38,10 @@ export async function POST(request: Request) {
   try {
     const message = await applyInboundStatus(messageId, status, providerMessageId);
     return NextResponse.json({ message });
-  } catch (err) {
-    console.error(`[outreach-status] failed to update message ${messageId}:`, err);
+  } catch {
+    console.error("route.ts: operación registrada");
     return NextResponse.json({ error: "Failed to update message" }, { status: 502 });
   }
 }
+
+export const POST = withMachine(guardedPOST,"OUTREACH_STATUS_SECRET","x-outreach-secret","");

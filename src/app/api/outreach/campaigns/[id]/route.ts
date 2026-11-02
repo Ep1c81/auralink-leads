@@ -1,8 +1,10 @@
+import { pageNumber } from "@/lib/pagination";
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { getCampaign, listMessagesForCampaign } from "@/lib/outreachCampaigns";
 
-export async function GET(
-  _request: Request,
+async function handleGET(
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -13,10 +15,12 @@ export async function GET(
   }
 
   try {
-    const messages = await listMessagesForCampaign(id);
+    const messages = await listMessagesForCampaign(id,pageNumber(new URL(request.url).searchParams.get("page")));
     return NextResponse.json({ campaign, messages });
-  } catch (err) {
-    console.error(`[outreach] failed to load campaign ${id}:`, err);
+  } catch {
+    console.error("route.ts: operación registrada");
     return NextResponse.json({ error: "Failed to load campaign" }, { status: 502 });
   }
 }
+
+export const GET = withOperator(handleGET);
