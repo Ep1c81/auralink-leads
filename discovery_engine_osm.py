@@ -1,178 +1,100 @@
-import requests
+"""Discovery OSM acotado, con caché/checkpoint local. No envía mensajes."""
+import argparse
+import hashlib
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+import requests
 
-import anthropic
-from dotenv import load_dotenv
-
-# Placeholder values the scraper writes when OSM has no phone tag.
-MISSING_PHONE_VALUES = {"", "n/a", "na", "none", "null"}
-
-SCORING_MODEL = "claude-haiku-5-5"
-SCORING_WORKERS = 8
-
-SCORING_SYSTEM_PROMPT = """You qualify local Costa Rican businesses as sales leads for a digital agency that sells NFC Google-review cards and website design/hosting.
-Every business you see already has a working phone number. Score how good a target it is from 1 to 10:
-- 8-10: the business has NO website. These are ideal targets for both the NFC review cards and a new website. Use 10 for high foot-traffic, review-driven businesses (restaurants, cafes, bars, salons, beauty, clinics, dentists, veterinarians) and 8-9 for the rest.
-- 1-5: the business ALREADY has a website. Use 4-5 for high foot-traffic, review-driven businesses that could still use NFC review cards, and 1-3 for the rest.
-Never return 6 or 7."""
-
-SCORE_SCHEMA = {
-    "type": "object",
-    "properties": {"score": {"type": "integer"}},
-    "required": ["score"],
-    "additionalProperties": False,
-}
-
+MISSING_PHONE_VALUES = {'', 'n/a', 'na', 'none', 'null'}
 def has_phone(lead):
-    phone = lead.get("phone_number")
-    return isinstance(phone, str) and phone.strip().lower() not in MISSING_PHONE_VALUES
+    value = lead.get('phone_number')
+    return isinstance(value, str) and value.strip().lower() not in MISSING_PHONE_VALUES
 
 def drop_leads_without_phone(leads):
-    """
-    Drops leads whose phone number is missing, blank, or a placeholder like "N/A".
-    """
+    # Compatibilidad con importadores antiguos; discovery conserva todos los registros.
     return [lead for lead in leads if has_phone(lead)]
 
-def ai_score_lead(client, lead):
-    """
-    Asks Claude for a 1-10 lead score. Returns None if the call fails so the
-    lead keeps the table default (lead_score = 0) and src/qualify_leads.py can
-    still pick it up later.
-    """
-    website_status = "No website" if lead.get("needs_website") else f"Has website: {lead.get('website')}"
-    lead_details = (
-        f"Business name: {lead.get('business_name')}\n"
-        f"Business type: {lead.get('business_type')}\n"
-        f"Website status: {website_status}"
-    )
-
-    try:
-        response = client.messages.create(
-            model=SCORING_MODEL,
-            max_tokens=2048,
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCORE_SCHEMA}},
-            system=SCORING_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": lead_details}],
-        )
-    except anthropic.AuthenticationError:
-        raise
-    except anthropic.APIError as e:
-        print(f"  AI scoring failed for {lead.get('business_name')!r}: {e}")
+def normalize_element(elem):
+    if not isinstance(elem, dict) or elem.get('type') not in ('node', 'way', 'relation') or not isinstance(elem.get('id'), int):
         return None
-
-    if response.stop_reason != "end_turn":
-        print(f"  AI scoring stopped early ({response.stop_reason}) for {lead.get('business_name')!r}")
+    tags = elem.get('tags', {})
+    if not isinstance(tags, dict) or not isinstance(tags.get('name'), str):
         return None
+    center = elem.get('center', elem)
+    lat, lon = center.get('lat'), center.get('lon')
+    if lat is not None and (not isinstance(lat, (int, float)) or not -90 <= lat <= 90): return None
+    if lon is not None and (not isinstance(lon, (int, float)) or not -180 <= lon <= 180): return None
+    address = ', '.join(str(tags[k]) for k in ('addr:street', 'addr:housenumber', 'addr:city', 'addr:state') if tags.get(k))
+    return {'source_key': f"osm_{elem['type']}_{elem['id']}", 'business_name': tags['name'],
+            'business_type': tags.get('amenity') or tags.get('shop') or 'SMB', 'address': address or None,
+            'phone_number': tags.get('phone') or tags.get('contact:phone'),
+            'website': tags.get('website') or tags.get('contact:website'), 'source': 'OpenStreetMap',
+            'latitude': lat, 'longitude': lon, 'discovered_at': datetime.now(timezone.utc).isoformat(),
+            'lead_score': 0, 'source_metadata': {'osm_type': elem['type'], 'osm_id': elem['id'], 'address_tags': {k: v for k, v in tags.items() if k.startswith('addr:')}, 'score_kind': 'sin estimar', 'attribution': '© OpenStreetMap contributors, ODbL'}}
 
-    text = next((block.text for block in response.content if block.type == "text"), "")
-    score = json.loads(text)["score"]
-    return max(1, min(10, int(score)))
+def save_to_json(data, filename='leads.json'):
+    target = Path(filename)
+    temporary = target.with_suffix(target.suffix + '.tmp')
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf8')
+    os.replace(temporary, target)
 
-def score_leads_with_ai(leads):
-    """
-    Adds an AI-generated lead_score (1-10) to each lead in place. lead_score is
-    the existing bizmap_leads column the dashboard sorts and displays.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("AI scoring skipped: ANTHROPIC_API_KEY not found in .env.local. Leads will upload with lead_score = 0.")
-        return leads
+def discover(bbox, category, checkpoint_dir, session=requests):
+    south, west, north, east = bbox
+    if not (-90 <= south < north <= 90 and -180 <= west < east <= 180) or (north-south)*(east-west) > .04:
+        raise ValueError('Usá una zona acotada, hasta 0,04 grados cuadrados.')
+    if category not in ('restaurant', 'cafe', 'bar', 'clinic', 'dentist', 'veterinary', 'pharmacy', 'hairdresser', 'beauty'):
+        raise ValueError('Categoría no permitida.')
+    key = hashlib.sha256(json.dumps([bbox,category]).encode()).hexdigest()
+    directory=Path(checkpoint_dir);directory.mkdir(parents=True,exist_ok=True)
+    checkpoint=directory/(key+'.json')
+    if checkpoint.exists():
+        data=json.loads(checkpoint.read_text())
+        if data.get('status')=='complete': return data['leads']
+    query=f'[out:json][timeout:20];nwr["{"shop" if category in ("hairdresser","beauty") else "amenity"}"="{category}"]({south},{west},{north},{east});out center 100;'
+    for attempt in range(3):
+        try:
+            start=time.monotonic()
+            with session.post('https://overpass-api.de/api/interpreter',data=query.encode(),headers={'User-Agent':'AuralinkLeads/3.0 (auralinkdigital.com)'},timeout=(5,25),stream=True,allow_redirects=False) as response:
+                if response.status_code in (429,503,504):
+                    delay=max(2**attempt, int(response.headers.get('Retry-After','0')) if response.headers.get('Retry-After','0').isdigit() else 60)
+                    save_to_json({'status':'partial','attempt':attempt+1,'retry_after_seconds':delay},checkpoint)
+                    if delay>30 or attempt==2: raise RuntimeError('Proveedor ocupado. Retomá desde el checkpoint más tarde.')
+                    time.sleep(delay);continue
+                response.raise_for_status()
+                chunks=[];size=0
+                for chunk in response.iter_content(65536):
+                    size+=len(chunk)
+                    if size>2097152 or time.monotonic()-start>30: raise RuntimeError('Respuesta fuera de los límites.')
+                    chunks.append(chunk)
+                payload=json.loads(b''.join(chunks))
+                if not isinstance(payload,dict) or not isinstance(payload.get('elements'),list): raise ValueError('Discovery malformado.')
+                leads={}
+                for elem in payload['elements']:
+                    lead=normalize_element(elem)
+                    if lead: leads[lead['source_key']]=lead
+                result=list(leads.values())
+                save_to_json({'status':'complete','leads':result},checkpoint)
+                return result
+        except (requests.RequestException,ValueError,RuntimeError):
+            if not checkpoint.exists():save_to_json({'status':'failed','attempt':attempt+1},checkpoint)
+            raise
+    raise RuntimeError('Discovery incompleto.')
 
-    client = anthropic.Anthropic()
-    print(f"Scoring {len(leads)} leads with {SCORING_MODEL}...")
-
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description='Búsqueda OSM pequeña y reanudable; no equivale a cobertura nacional.')
+    parser.add_argument('--bbox',nargs=4,type=float,required=True,metavar=('SUR','OESTE','NORTE','ESTE'))
+    parser.add_argument('--category',required=True)
+    parser.add_argument('--output',default='discovery-results.json')
+    parser.add_argument('--checkpoints',default='.discovery-checkpoints')
+    args=parser.parse_args()
     try:
-        with ThreadPoolExecutor(max_workers=SCORING_WORKERS) as pool:
-            scores = list(pool.map(lambda lead: ai_score_lead(client, lead), leads))
-    except anthropic.AuthenticationError:
-        print("AI scoring skipped: ANTHROPIC_API_KEY was rejected. Leads will upload with lead_score = 0.")
-        return leads
-
-    for lead, score in zip(leads, scores):
-        if score is not None:
-            lead["lead_score"] = score
-
-    scored = sum(score is not None for score in scores)
-    print(f"AI scored {scored}/{len(leads)} leads.")
-    return leads
-
-def discover_leads_gam():
-    """
-    Queries OpenStreetMap for a massive variety of SMBs across the entire Costa Rican GAM.
-    """
-    url = "https://overpass-api.de/api/interpreter"
-    
-    # Bounding Box for the GAM: [South-Lat, West-Lon, North-Lat, East-Lon]
-    # This covers Alajuela, Heredia, San José, Cartago, Escazú, Santa Ana, etc.
-    query = """
-    [out:json][timeout:90];
-    (
-      node["amenity"~"restaurant|cafe|bar|clinic|dentist|veterinary|pharmacy"](9.75, -84.40, 10.15, -83.70);
-      way["amenity"~"restaurant|cafe|bar|clinic|dentist|veterinary|pharmacy"](9.75, -84.40, 10.15, -83.70);
-      node["shop"~"hairdresser|beauty|car_repair|clothes|bakery|supermarket|hardware"](9.75, -84.40, 10.15, -83.70);
-      way["shop"~"hairdresser|beauty|car_repair|clothes|bakery|supermarket|hardware"](9.75, -84.40, 10.15, -83.70);
-    );
-    out center tags;
-    """
-    
-    headers = {
-        "User-Agent": "Auralinkdigital.com-Lead-Engine/2.0"
-    }
-    
-    print("Initializing massive GAM sweep for SMBs (this may take up to 30 seconds)...")
-    
-    response = requests.post(url, data=query.encode('utf-8'), headers=headers)
-    
-    if response.status_code != 200:
-        print(f"Error fetching data: {response.status_code}\nDetails: {response.text}")
-        return []
-        
-    data = response.json()
-    elements = data.get("elements", [])
-    
-    leads = []
-    for elem in elements:
-        tags = elem.get("tags", {})
-        name = tags.get("name")
-        
-        if not name:
-            continue
-            
-        phone = tags.get("phone") or tags.get("contact:phone") or "N/A"
-        website = tags.get("website") or tags.get("contact:website") or "N/A"
-        
-        # Identify the business type for better filtering later
-        biz_type = tags.get("amenity") or tags.get("shop") or "SMB"
-        
-        lead = {
-            "business_name": name,
-            "business_type": biz_type,
-            "address": "GAM, Costa Rica", # Broad address fallback
-            "website": website,
-            "phone_number": phone,
-            "source": "OpenStreetMap",
-            "needs_website": website == "N/A"
-        }
-        leads.append(lead)
-        
-    return leads
-
-def save_to_json(data, filename="leads.json"):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    print(f"\nSuccessfully saved {len(data)} REAL leads to {filename}")
-
-if __name__ == "__main__":
-    scraped_leads = discover_leads_gam()
-    extracted_leads = drop_leads_without_phone(scraped_leads)
-    print(f"Dropped {len(scraped_leads) - len(extracted_leads)} leads with no phone number; {len(extracted_leads)} remain.")
-
-    if extracted_leads:
-        load_dotenv(".env.local")
-        score_leads_with_ai(extracted_leads)
-        save_to_json(extracted_leads)
-        print("\nSample Real Lead Extracted:")
-        print(json.dumps(extracted_leads[0], indent=2, ensure_ascii=False))
-    else:
-        print("No leads found. Check the Overpass query.")
+        result=discover(args.bbox,args.category,args.checkpoints)
+        save_to_json(result,args.output)
+        print(f'Discovery completo: {len(result)} registros guardados antes de cualquier scoring.')
+    except Exception:
+        print('Discovery incompleto. Revisá la configuración y el checkpoint; no se descartó el avance.',file=sys.stderr)
+        sys.exit(1)

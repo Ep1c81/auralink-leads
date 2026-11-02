@@ -5,6 +5,12 @@ import type { CampaignStatus, OutreachMessageStatus } from "@/lib/types";
 // deliberately light (300) against low-opacity fills so contrast stays high
 // against the module's dark canvas regardless of which panel a badge sits on.
 const MESSAGE_STATUS_STYLES: Record<OutreachMessageStatus, string> = {
+  processing: "bg-sky-500/15 text-sky-300",
+  transmitting: "bg-sky-500/15 text-sky-300",
+  accepted: "bg-sky-500/15 text-sky-300",
+  delivered: "bg-emerald-500/15 text-emerald-300",
+  uncertain: "bg-amber-500/15 text-amber-300",
+  suppressed: "bg-slate-500/15 text-slate-300",
   draft: "bg-slate-500/15 text-slate-300 ring-slate-400/30",
   queued: "bg-sky-500/15 text-sky-300 ring-sky-400/30",
   sent: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/30",
@@ -13,11 +19,12 @@ const MESSAGE_STATUS_STYLES: Record<OutreachMessageStatus, string> = {
 };
 
 const MESSAGE_STATUS_LABELS: Record<OutreachMessageStatus, string> = {
-  draft: "Draft",
-  queued: "Queued",
-  sent: "Sent",
-  failed: "Failed",
-  bounced: "Bounced",
+  processing:"Procesando",transmitting:"Transmisión iniciada",accepted:"Aceptado por el proveedor",delivered:"Entregado",uncertain:"Resultado incierto",suppressed:"Suprimido",
+  draft: "Borrador",
+  queued: "En cola",
+  sent: "Envío histórico sin comprobante",
+  failed: "Fallido",
+  bounced: "Rebotado",
 };
 
 const CAMPAIGN_STATUS_STYLES: Record<CampaignStatus, string> = {

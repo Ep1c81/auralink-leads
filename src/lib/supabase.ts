@@ -1,3 +1,4 @@
+import 'server-only';
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /**
@@ -17,7 +18,6 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 const URL_VARS = ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"] as const;
 const KEY_VARS = [
   "SUPABASE_SERVICE_ROLE_KEY",
-  "NEXT_PUBLIC_SUPABASE_ANON_KEY",
 ] as const;
 
 export type SupabaseEnv = {
@@ -81,7 +81,7 @@ export function getSupabase(): SupabaseClient {
   if (client) return client;
 
   const { url, key, problems } = resolveSupabaseEnv();
-  if (!url || !key) {
+  if (!url || !key || problems.length) {
     throw new Error(`Supabase is not configured: ${problems.join("; ")}`);
   }
 

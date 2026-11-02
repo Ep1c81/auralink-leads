@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { supabase } from "@/lib/supabase";
 import type { Lead } from "@/lib/types";
 
 export interface DiscoveredBusiness {
   placeId: string;
+  latitude?: number;
+  longitude?: number;
   name: string;
   address: string | null;
   phone: string | null;
@@ -43,8 +46,6 @@ const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 // query) fails fast since it would fail identically on every mirror.
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 
 const USER_AGENT = "prospect-lead-engine/1.0 (business discovery)";
@@ -59,7 +60,10 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, { ...options, redirect: 'error', signal: controller.signal });
+    const reader = response.body?.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+    if (reader) { while (true) { const {done,value} = await reader.read(); if(done) break; size += value.length; if(size>2097152) { await reader.cancel(); throw new Error('Respuesta demasiado grande'); } chunks.push(value); } }
+    return new Response(new Uint8Array(Buffer.concat(chunks)), {status:response.status,headers:response.headers});
   } finally {
     clearTimeout(timeout);
   }
@@ -81,6 +85,9 @@ interface NominatimResult {
 interface OverpassElement {
   type: "node" | "way" | "relation";
   id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
   tags?: Record<string, string>;
 }
 
@@ -96,18 +103,15 @@ interface OverpassResponse {
  *   3. Google Places (Text Search, New), if OSM entirely fails.
  * This chain is designed to always return results rather than throw.
  */
-export async function searchBusinesses(
+async function searchBusinessesUncached(
   industry: string,
   location: string,
   limit = 20
 ): Promise<DiscoveredBusiness[]> {
   try {
     return await searchBusinessesOSM(industry, location, limit);
-  } catch (err) {
-    console.error(
-      "[OpenStreetMap] request error, falling back to Google Places:",
-      err
-    );
+  } catch {
+    console.error("discovery.ts: operación registrada");
     return searchBusinessesGooglePlaces(industry, location, limit);
   }
 }
@@ -136,10 +140,7 @@ async function searchBusinessesGooglePlaces(
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(
-      `[Google Places] search failed (${response.status} ${response.statusText}):`,
-      errorBody
-    );
+    console.error("discovery.ts: operación registrada");
     throw new Error(`Places search failed (${response.status}): ${errorBody}`);
   }
 
@@ -284,6 +285,7 @@ async function geocodeBoundingBox(
   }
 
   const [south, north, west, east] = bbox.map(Number);
+  if (![south,west,north,east].every(Number.isFinite) || south>=north || west>=east || (north-south)*(east-west)>.04) throw new Error("Elegí un distrito o una zona más pequeña.");
   return { south, west, north, east };
 }
 
@@ -305,7 +307,9 @@ function parseOverpassResponse(
   const seen = new Set<string>();
   const businesses: DiscoveredBusiness[] = [];
 
+  if (!Array.isArray(data.elements)) throw new Error("Discovery malformado");
   for (const el of data.elements) {
+    if (!el || !["node","way","relation"].includes(el.type) || !Number.isSafeInteger(el.id)) continue;
     const tags = el.tags;
     if (!tags?.name) continue;
 
@@ -315,6 +319,8 @@ function parseOverpassResponse(
 
     businesses.push({
       placeId,
+      latitude: el.lat ?? el.center?.lat,
+      longitude: el.lon ?? el.center?.lon,
       name: tags.name,
       address: formatOSMAddress(tags),
       phone: tags.phone ?? tags["contact:phone"] ?? null,
@@ -354,17 +360,14 @@ async function tryOverpassMirror(
     }
 
     const errorBody = await response.text();
-    console.error(
-      `[Overpass] ${endpoint} failed (${response.status} ${response.statusText}):`,
-      errorBody
-    );
+    console.error("discovery.ts: operación registrada");
     return {
       ok: false,
       retryable: response.status === 429 || response.status === 504,
       error: new Error(`Overpass search failed (${response.status}): ${errorBody}`),
     };
   } catch (err) {
-    console.error(`[Overpass] ${endpoint} request error:`, err);
+    console.error("discovery.ts: operación registrada");
     return {
       ok: false,
       retryable: isNetworkOrTimeoutError(err),
@@ -392,7 +395,7 @@ async function queryOverpassWithFailover(query: string): Promise<OverpassRespons
       throw result.error;
     }
 
-    console.error(`[Overpass] ${endpoint} unavailable, trying next mirror.`);
+    console.error("discovery.ts: operación registrada");
   }
 
   throw lastError;
@@ -431,63 +434,9 @@ async function searchBusinessesOSM(
     const data = await queryOverpassWithFailover(query);
     return parseOverpassResponse(data, cap);
   } catch (err) {
-    console.error(
-      "[Overpass] all mirrors failed, falling back to Nominatim search:",
-      err
-    );
-    return searchBusinessesNominatim(industry, location, cap);
+    console.error("discovery.ts: operación registrada");
+    throw new Error("Discovery temporalmente no disponible; conservá el avance y reintentá más tarde.", { cause: err });
   }
-}
-
-interface NominatimSearchResult {
-  osm_type: string;
-  osm_id: number;
-  display_name: string;
-  extratags?: Record<string, string>;
-}
-
-/**
- * Direct Nominatim free-text business search — the final OSM fallback when
- * every Overpass mirror is unavailable. Uses a comma-separated query
- * ("industry, location"); Nominatim's geocoder does not reliably handle
- * natural-language phrasing like "industry in location".
- */
-async function searchBusinessesNominatim(
-  industry: string,
-  location: string,
-  cap: number
-): Promise<DiscoveredBusiness[]> {
-  const url = new URL(NOMINATIM_SEARCH_URL);
-  url.searchParams.set("q", `${industry}, ${location}`);
-  url.searchParams.set("format", "json");
-  url.searchParams.set("extratags", "1");
-  url.searchParams.set("limit", String(cap));
-
-  const response = await fetchWithTimeout(url.toString(), {
-    headers: { "User-Agent": USER_AGENT },
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(
-      `[Nominatim] search failed (${response.status} ${response.statusText}):`,
-      errorBody
-    );
-    throw new Error(`Nominatim search failed (${response.status}): ${errorBody}`);
-  }
-
-  const data = (await response.json()) as NominatimSearchResult[];
-
-  return data.map((result) => ({
-    placeId: `osm_${result.osm_type}_${result.osm_id}`,
-    name: result.display_name.split(",")[0]?.trim() ?? result.display_name,
-    address: result.display_name,
-    phone: result.extratags?.phone ?? result.extratags?.["contact:phone"] ?? null,
-    website: result.extratags?.website ?? result.extratags?.["contact:website"] ?? null,
-    rating: null,
-    userRatingCount: null,
-    source: "osm" as const,
-  }));
 }
 
 // Shared by /api/prospecting and /api/cron/auto-prospect so both manual and
@@ -505,7 +454,7 @@ export function isLowRatingTarget(business: {
 }): boolean {
   const hasLowRating = business.rating !== null && business.rating < LOW_RATING_THRESHOLD;
   const hasFewReviews =
-    business.userRatingCount === null || business.userRatingCount < LOW_REVIEW_COUNT_THRESHOLD;
+    business.userRatingCount !== null && business.userRatingCount < LOW_REVIEW_COUNT_THRESHOLD;
   return hasLowRating || hasFewReviews;
 }
 
@@ -537,26 +486,20 @@ export async function importDiscoveredBusinesses(
   const newBusinesses = businesses.filter((b) => !existingPlaceIds.has(b.placeId));
   if (newBusinesses.length === 0) return [];
 
-  // `leads` has a unique (name, company) index — dedupe within this batch too,
-  // since discovery sources can return the same business name twice (e.g. a
-  // chain with multiple listings) and place_id alone won't catch that.
-  const seenNameCompany = new Set<string>();
-  const dedupedBusinesses = newBusinesses.filter((b) => {
-    const key = `${b.name}::${b.name}`;
-    if (seenNameCompany.has(key)) return false;
-    seenNameCompany.add(key);
-    return true;
-  });
-
+  const dedupedBusinesses = [...new Map(newBusinesses.map(b => [b.placeId, b])).values()];
   const { data: imported, error } = await supabase
     .from("leads")
     .upsert(
       dedupedBusinesses.map((b) => ({
+        source_key: b.placeId,
         name: b.name,
         company: b.name,
         phone: b.phone,
         status: "new",
         metadata: {
+          latitude: b.latitude ?? null,
+          longitude: b.longitude ?? null,
+          discovered_at: new Date().toISOString(),
           source: b.source,
           place_id: b.placeId,
           address: b.address,
@@ -567,7 +510,7 @@ export async function importDiscoveredBusinesses(
           location,
         },
       })),
-      { onConflict: "name,company", ignoreDuplicates: true }
+      { onConflict: "source_key", ignoreDuplicates: true }
     )
     .select();
 
@@ -576,4 +519,19 @@ export async function importDiscoveredBusinesses(
   }
 
   return (imported ?? []) as Lead[];
+}
+
+export async function searchBusinesses(industry: string, location: string, limit = 20): Promise<DiscoveredBusiness[]> {
+ if(typeof industry!=="string" || typeof location!=="string" || industry.length>100 || location.length>100 || !Number.isInteger(limit) || limit<1 || limit>20) throw new Error("Revisá la zona, categoría y cantidad.");
+ const key=createHash('sha256').update(JSON.stringify([industry.toLowerCase(),location.toLowerCase(),limit,new Date().toISOString().slice(0,10)])).digest('hex');
+ const {data:cached,error:cacheError}=await supabase.from('discovery_runs').select('status,result').eq('run_key',key).maybeSingle();
+ if(cacheError)throw cacheError;
+ if(cached?.status==='complete')return cached.result as DiscoveredBusiness[];
+ const claim=await supabase.rpc('claim_discovery',{p_key:key});if(claim.error||!claim.data)throw new Error("Ya hay una búsqueda en curso o en espera de reintento.");
+ try {
+ const slot=await supabase.rpc('reserve_resource',{p_resource:'discovery',p_limit:50,p_spacing:2});if(slot.error||!slot.data)throw new Error("Límite de búsqueda alcanzado. Intentá más tarde.");
+ const result=await searchBusinessesUncached(industry,location,limit);
+ const saved=await supabase.from('discovery_runs').update({status:'complete',result,updated_at:new Date().toISOString()}).eq('run_key',key);if(saved.error)throw saved.error;
+ return result;
+ }catch(error){await supabase.from('discovery_runs').update({status:'failed',lease_until:new Date(Date.now()+60000).toISOString()}).eq('run_key',key);throw error;}
 }

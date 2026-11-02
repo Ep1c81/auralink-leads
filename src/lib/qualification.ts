@@ -1,3 +1,4 @@
+import { reserveAI } from "@/lib/resourceBudget";
 import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import { notifyLeadQualified } from "@/lib/notifications";
@@ -105,8 +106,8 @@ async function requestQualification(
   model: string,
   signal?: AbortSignal
 ): Promise<BantQualification> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const apiKey = process.env.AI_ENABLED === "true" ? process.env.ANTHROPIC_API_KEY : undefined;
+  if (!apiKey || !await reserveAI()) {
     throw new Error("ANTHROPIC_API_KEY is not set");
   }
 
@@ -264,11 +265,9 @@ export async function runBantQualificationFromProfileWithFallback(
   signal?: AbortSignal
 ): Promise<{ qualification: BantQualification; usedFallback: boolean }> {
   const maxAttempts = RATE_LIMIT_RETRY_DELAYS_MS.length + 1;
-  let lastError: unknown;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) {
-      lastError = signal.reason ?? new Error("Qualification aborted");
       break;
     }
 
@@ -276,24 +275,18 @@ export async function runBantQualificationFromProfileWithFallback(
       const qualification = await runBantQualificationFromProfile(lead, contextNote, signal);
       return { qualification, usedFallback: false };
     } catch (err) {
-      lastError = err;
 
       if (!isRateLimitError(err) || attempt === maxAttempts - 1) {
         break;
       }
 
       const delay = RATE_LIMIT_RETRY_DELAYS_MS[attempt];
-      console.warn(
-        `[qualification] Rate limited qualifying lead ${lead.id} (attempt ${attempt + 1}/${maxAttempts}); retrying in ${delay}ms`
-      );
+      console.warn("qualification.ts: operación registrada");
       await sleep(delay, signal);
     }
   }
 
-  console.error(
-    `[qualification] Claude qualification failed or timed out for lead ${lead.id}, using heuristic fallback:`,
-    lastError
-  );
+  console.error("qualification.ts: operación registrada");
   return { qualification: computeHeuristicQualification(lead), usedFallback: true };
 }
 

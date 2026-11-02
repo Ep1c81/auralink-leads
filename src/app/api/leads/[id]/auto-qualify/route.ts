@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyLeadProfile } from "@/lib/qualification";
@@ -17,7 +18,7 @@ const DEFAULT_CONTEXT_PROMPT =
  * when the result comes back qualified — best-effort enriches from the
  * lead's website and generates outreach copy, all in a single request.
  */
-export async function POST(
+async function handlePOST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -60,16 +61,16 @@ export async function POST(
       if (enriched) {
         finalLead = enriched;
       }
-    } catch (err) {
-      console.error(`[auto-qualify] enrichment threw for lead ${id}:`, err);
+    } catch {
+      console.error("route.ts: operación registrada");
     }
 
     try {
       const outreachResult = await generateAndSaveOutreach(finalLead);
       finalLead = outreachResult.lead;
       outreach = outreachResult.outreach;
-    } catch (err) {
-      console.error(`[auto-qualify] outreach generation threw for lead ${id}:`, err);
+    } catch {
+      console.error("route.ts: operación registrada");
     }
   }
 
@@ -79,3 +80,5 @@ export async function POST(
     outreach,
   });
 }
+
+export const POST = withOperator(handlePOST);

@@ -21,6 +21,7 @@ export async function notifyLeadQualified(
   lead: Lead,
   qualification: BantQualification
 ): Promise<void> {
+  if (process.env.OPERATOR_ALERTS_ENABLED !== 'true') return;
   const message = formatAlert(lead, qualification);
 
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -28,7 +29,7 @@ export async function notifyLeadQualified(
   const toNumber = process.env.WHATSAPP_ALERT_TO;
 
   if (!phoneNumberId || !accessToken || !toNumber) {
-    console.log(`[notifications] WhatsApp not configured, logging alert:\n${message}`);
+    console.log("notifications.ts: operación registrada");
     return;
   }
 
@@ -37,6 +38,8 @@ export async function notifyLeadQualified(
       `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`,
       {
         method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10000),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -51,12 +54,10 @@ export async function notifyLeadQualified(
     );
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      console.error(
-        `[notifications] WhatsApp send failed (${response.status}): ${errorBody}`
-      );
+
+      console.error("notifications.ts: operación registrada");
     }
-  } catch (err) {
-    console.error("[notifications] WhatsApp send threw:", err);
+  } catch {
+    console.error("notifications.ts: operación registrada");
   }
 }

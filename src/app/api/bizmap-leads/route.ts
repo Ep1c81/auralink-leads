@@ -1,72 +1,13 @@
-import { NextResponse } from "next/server";
-import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
-import { describeFetchCause } from "@/lib/apiErrors";
-
-export const dynamic = "force-dynamic";
-
-// This table (~1,061 rows after the 2026-09-14 dedupe/purge) is the Auralink
-// Digital CRM Pipeline — a separate dataset from `leads`/`/api/leads`, which
-// backs the unrelated BANT-qualification/outreach pipeline on the root page.
-// See supabase/migrations/20260914041357_dedupe_and_purge_bizmap_leads.sql.
-//
-// PostgREST enforces its own `db-max-rows` cap (1000 by default) on top of
-// whatever `.limit()` asks for — a single request silently truncates past
-// that, so this pages with `.range()` until a page comes back short.
-const PAGE_SIZE = 1000;
-const RESULT_CAP = 20000;
-
-export async function GET() {
-  const env = resolveSupabaseEnv();
-  if (env.problems.length > 0) {
-    console.error("[/api/bizmap-leads] Supabase misconfigured:", env.problems);
-    return NextResponse.json(
-      { error: "Supabase is not configured", problems: env.problems },
-      { status: 500 }
-    );
-  }
-
-  try {
-    const client = getSupabase();
-    const leads: Record<string, unknown>[] = [];
-
-    while (leads.length < RESULT_CAP) {
-      const from = leads.length;
-      const { data, error } = await client
-        .from("bizmap_leads")
-        .select("*")
-        .order("lead_score", { ascending: false })
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: true }) // tiebreaker: keeps .range() pagination stable across ties
-        .range(from, from + PAGE_SIZE - 1);
-
-      if (error) {
-        console.error("[/api/bizmap-leads] Supabase query error:", {
-          message: error.message,
-          code: error.code,
-          details: error.details,
-          hint: error.hint,
-        });
-        return NextResponse.json(
-          { error: "Failed to load leads", code: error.code, details: error.message },
-          { status: 500 }
-        );
-      }
-
-      leads.push(...(data ?? []));
-      if (!data || data.length < PAGE_SIZE) break;
-    }
-
-    return NextResponse.json({ leads });
-  } catch (error) {
-    const cause = describeFetchCause(error);
-    console.error("[/api/bizmap-leads] Network failure reaching Supabase:", {
-      supabaseUrl: env.url,
-      keySource: env.keyName,
-      ...cause,
-    });
-    return NextResponse.json(
-      { error: "Could not reach Supabase", details: cause },
-      { status: 500 }
-    );
-  }
-}
+import { withOperator } from '@/lib/security/auth';
+import { getSupabase } from '@/lib/supabase';
+export const GET=withOperator(async(request:Request)=>{
+ const p=new URL(request.url).searchParams, page=Number(p.get('page')??0);
+ if(!Number.isInteger(page)||page<0||page>10000)return Response.json({error:'Página inválida'},{status:400});
+ let q=getSupabase().from('bizmap_leads').select('id,business_name,business_type,address,phone_number,website,lead_score,created_at,outreached_at,outreach_status,has_replied,source,source_key,source_metadata,commercial_status,next_action_at,operator_notes',{count:'exact'});
+ for(const [key,column] of [['zone','address'],['category','business_type']] as const){const value=p.get(key);if(value){if(value.length>100)return Response.json({error:'Filtro inválido'},{status:400});q=q.ilike(column,`%${value.replace(/[%_]/g,'')}%`);}}
+ const status=p.get('status');if(status)q=q.eq('commercial_status',status);
+ if(p.get('due')==='1')q=q.lte('next_action_at',new Date().toISOString());
+ const {data,error,count}=await q.order('lead_score',{ascending:false}).order('id').range(page*50,page*50+49);
+ if(error)throw error;
+ return Response.json({leads:data??[],total:count??0,page,page_size:50});
+});

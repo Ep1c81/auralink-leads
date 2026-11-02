@@ -412,6 +412,8 @@ export default function Home() {
 
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [leadPage,setLeadPage]=useState(0),[leadTotal,setLeadTotal]=useState(0),[stale,setStale]=useState(false);
+  const leadsVersion=useRef(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -464,27 +466,15 @@ export default function Home() {
   const [autoPilotError, setAutoPilotError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const res = await fetch("/api/leads");
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        if (!cancelled) setLeads(data.leads ?? []);
-      } catch {
-        // silent: polling failures shouldn't disrupt the dashboard
-      }
+    let cancelled=false,inFlight=false;const controller=new AbortController();
+    const load=async()=>{
+      if(inFlight||document.hidden)return;inFlight=true;const version=leadsVersion.current;
+      try{const res=await fetch(`/api/leads?page=${leadPage}`,{signal:controller.signal});if(!res.ok)throw new Error('No se pudo actualizar');const data=await res.json();if(!cancelled&&version===leadsVersion.current){setLeads(data.leads??[]);setLeadTotal(data.total??0);setStale(false);}}
+      catch{if(!cancelled)setStale(true);}finally{inFlight=false;}
     };
-
-    const interval = setInterval(load, POLL_INTERVAL_MS);
-    load();
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
+    void load();const interval=setInterval(load,POLL_INTERVAL_MS);
+    return()=>{cancelled=true;controller.abort();clearInterval(interval);};
+  },[leadPage]);
 
   // Drives the "Run Background Auto-Pilot" toggle: while enabled, repeatedly
   // triggers a full /api/cron/auto-prospect sweep (discover -> import ->
@@ -523,13 +513,8 @@ export default function Home() {
             );
             setAutoPilotLastRun({ at: new Date().toISOString(), ...totals });
 
-            // Pull the fresh leads in immediately so newly imported/qualified
-            // businesses show up without waiting on the next poll tick.
-            const leadsRes = await fetch("/api/leads");
-            if (leadsRes.ok && !cancelled) {
-              const leadsData = await leadsRes.json();
-              setLeads(leadsData.leads ?? []);
-            }
+            // El polling controlado actualiza la página visible sin sobrescribir ediciones recientes.
+
           }
         } catch {
           if (!cancelled) setAutoPilotError("Network error during Auto-Pilot sweep");
@@ -580,6 +565,7 @@ export default function Home() {
 
       setLastResult({ lead: data.lead, qualification: data.qualification });
       setForm(EMPTY_FORM);
+      leadsVersion.current+=1;
       setLeads((prev) => {
         const rest = prev.filter((l) => l.id !== data.lead.id);
         return [data.lead as Lead, ...rest];
@@ -614,7 +600,8 @@ export default function Home() {
       setProspectResult(result);
 
       if (result.imported.length > 0) {
-        setLeads((prev) => {
+        leadsVersion.current+=1;
+      setLeads((prev) => {
           const importedIds = new Set(result.imported.map((l) => l.id));
           const rest = prev.filter((l) => !importedIds.has(l.id));
           return [...result.imported, ...rest];
@@ -687,6 +674,7 @@ export default function Home() {
         return false;
       }
 
+      leadsVersion.current+=1;
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
       return true;
     } catch (err) {
@@ -766,6 +754,7 @@ export default function Home() {
         return false;
       }
 
+      leadsVersion.current+=1;
       setLeads((prev) => prev.map((l) => (l.id === leadId ? (data.lead as Lead) : l)));
       return true;
     } catch (err) {
@@ -860,6 +849,7 @@ export default function Home() {
       }
 
       setOutreachContent(data.outreach as OutreachContent);
+      leadsVersion.current+=1;
       setLeads((prev) => prev.map((l) => (l.id === lead.id ? (data.lead as Lead) : l)));
     } catch {
       setOutreachError("Network error while generating outreach");
@@ -896,6 +886,7 @@ export default function Home() {
           />
         </header>
 
+        <nav className="flex flex-wrap gap-4 my-4" aria-label="Paginación de prospectos"><button disabled={leadPage===0} onClick={()=>setLeadPage(p=>p-1)}>Anterior</button><span>Página {leadPage+1} · {leadTotal} prospectos</span><button disabled={(leadPage+1)*50>=leadTotal} onClick={()=>setLeadPage(p=>p+1)}>Siguiente</button><span role="status">{stale?'Los datos pueden estar desactualizados. Reintentando…':''}</span></nav>
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">
           <section className="lg:col-span-2">
             <div className="inline-flex rounded-lg border border-zinc-200 p-1 dark:border-zinc-800">

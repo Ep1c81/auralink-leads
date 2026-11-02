@@ -1,3 +1,4 @@
+import { pageNumber } from "@/lib/pagination";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCampaign, listMessagesForCampaign } from "@/lib/outreachCampaigns";
@@ -17,15 +18,16 @@ export default async function CampaignDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ openMessage?: string }>;
+  searchParams: Promise<{ openMessage?: string; page?: string }>;
 }) {
   const { id } = await params;
-  const { openMessage } = await searchParams;
+  const { openMessage, page: rawPage } = await searchParams;
 
   const campaign = await getCampaign(id);
   if (!campaign) notFound();
 
-  const messages = await listMessagesForCampaign(id);
+  const page=pageNumber(rawPage);
+  const messages = await listMessagesForCampaign(id,page);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-10 sm:px-6 lg:py-14">
@@ -38,6 +40,7 @@ export default async function CampaignDetailPage({
         <StatusBadge kind="campaign" status={campaign.status} />
       </div>
 
+      <nav className="flex gap-4" aria-label="Paginación de mensajes">{page>0&&<Link href={`/outreach/${id}?page=${page-1}`}>Anterior</Link>}<span>Página {page+1}</span>{messages.length===50&&<Link href={`/outreach/${id}?page=${page+1}`}>Siguiente</Link>}</nav>
       {messages.length === 0 ? (
         <EmptyState
           title="No messages yet"

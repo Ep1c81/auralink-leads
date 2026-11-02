@@ -1,3 +1,6 @@
+import { reserveAI } from "@/lib/resourceBudget";
+import 'server-only';
+import { requireOperator } from '@/lib/security/auth';
 import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import type {
@@ -84,9 +87,9 @@ Submit the result by calling the submit_cold_email tool.`;
  * to deterministic Spanish copy so draft generation always succeeds.
  */
 async function generateColdEmail(lead: Lead): Promise<{ subject: string; body: string }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.error(`[outreachCampaigns] ANTHROPIC_API_KEY is not set, using fallback for lead ${lead.id}`);
+  const apiKey = process.env.AI_ENABLED === "true" ? process.env.ANTHROPIC_API_KEY : undefined;
+  if (!apiKey || !await reserveAI()) {
+    console.error("outreachCampaigns.ts: operación registrada");
     return buildFallbackEmail(lead);
   }
 
@@ -119,8 +122,8 @@ async function generateColdEmail(lead: Lead): Promise<{ subject: string; body: s
     }
 
     return { subject: input.subject, body: input.body };
-  } catch (err) {
-    console.error(`[outreachCampaigns] Claude generation failed for lead ${lead.id}, using fallback:`, err);
+  } catch {
+    console.error("outreachCampaigns.ts: operación registrada");
     return buildFallbackEmail(lead);
   }
 }
@@ -175,11 +178,12 @@ export async function generateDraftMessage(
   return message as OutreachMessage;
 }
 
-export async function listCampaigns(): Promise<OutreachCampaignWithCounts[]> {
+export async function listCampaigns(page = 0): Promise<OutreachCampaignWithCounts[]> {
+  await requireOperator();
   const { data: campaigns, error } = await supabase
     .from("outreach_campaigns")
-    .select("*")
-    .order("created_at", { ascending: false });
+    .select("id,name,status,created_at")
+    .order("created_at", { ascending: false }).order("id").range(page*50,page*50+49);
 
   if (error) {
     throw new Error(`Failed to list campaigns: ${error.message}`);
@@ -247,6 +251,7 @@ export async function createCampaign(name: string): Promise<OutreachCampaign> {
 }
 
 export async function getCampaign(campaignId: string): Promise<OutreachCampaign | null> {
+  await requireOperator();
   const { data, error } = await supabase
     .from("outreach_campaigns")
     .select("*")
@@ -258,13 +263,14 @@ export async function getCampaign(campaignId: string): Promise<OutreachCampaign 
 }
 
 export async function listMessagesForCampaign(
-  campaignId: string
+  campaignId: string, page = 0
 ): Promise<OutreachMessageWithLead[]> {
+  await requireOperator();
   const { data, error } = await supabase
     .from("outreach_messages")
-    .select("*, lead:leads(id,name,company,email)")
+    .select("*, lead:leads(id,name,company,email,phone)")
     .eq("campaign_id", campaignId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false }).order("id").range(page*50,page*50+49);
 
   if (error) {
     throw new Error(`Failed to list messages: ${error.message}`);
@@ -274,9 +280,10 @@ export async function listMessagesForCampaign(
 }
 
 export async function getMessage(messageId: string): Promise<OutreachMessageWithLead | null> {
+  await requireOperator();
   const { data, error } = await supabase
     .from("outreach_messages")
-    .select("*, lead:leads(id,name,company,email)")
+    .select("*, lead:leads(id,name,company,email,phone)")
     .eq("id", messageId)
     .single();
 
@@ -309,6 +316,7 @@ export async function updateDraftMessage(
     .from("outreach_messages")
     .update(fields)
     .eq("id", messageId)
+    .eq("status", "draft")
     .select()
     .single();
 
@@ -319,65 +327,12 @@ export async function updateDraftMessage(
   return data as OutreachMessage;
 }
 
-/**
- * The human-review gate: approves a draft and moves it to "queued", then
- * best-effort POSTs it to the n8n outbound webhook. A webhook failure never
- * blocks the status transition — n8n (or a retry) picks up queued messages
- * independently; this call site never builds the actual send logic.
- */
-export async function queueMessage(messageId: string): Promise<OutreachMessage> {
-  const { data: existing, error: fetchError } = await supabase
-    .from("outreach_messages")
-    .select("*, lead:leads(id,email)")
-    .eq("id", messageId)
-    .single();
-
-  if (fetchError || !existing) {
-    throw new Error("Message not found");
-  }
-  if ((existing.status as OutreachMessageStatus) !== "draft") {
-    throw new Error("Only draft messages can be queued");
-  }
-
-  const { data: updated, error: updateError } = await supabase
-    .from("outreach_messages")
-    .update({ status: "queued" satisfies OutreachMessageStatus })
-    .eq("id", messageId)
-    .select()
-    .single();
-
-  if (updateError || !updated) {
-    throw new Error(`Failed to queue message: ${updateError?.message}`);
-  }
-
-  const webhookUrl = process.env.N8N_OUTREACH_WEBHOOK;
-  if (webhookUrl) {
-    const lead = (existing as unknown as { lead: { email: string | null } | null }).lead;
-    try {
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message_id: updated.id,
-          lead_id: updated.lead_id,
-          subject: updated.subject,
-          body: updated.body,
-          to_email: lead?.email ?? null,
-        }),
-      });
-      if (!response.ok) {
-        console.error(
-          `[outreachCampaigns] outbound webhook responded ${response.status} for message ${messageId}`
-        );
-      }
-    } catch (err) {
-      console.error(`[outreachCampaigns] outbound webhook failed for message ${messageId}:`, err);
-    }
-  } else {
-    console.warn("[outreachCampaigns] N8N_OUTREACH_WEBHOOK not configured; message queued but not sent");
-  }
-
-  return updated as OutreachMessage;
+/** Aprueba exactamente el texto y destinatario revisados en una transacción SQL. */
+export async function queueMessage(messageId: string, expected: {subject: string; body: string; phone: string}): Promise<OutreachMessage> {
+  const user=await requireOperator();
+  const {data,error}=await supabase.rpc('approve_campaign_message',{p_message:messageId,p_operator:user.id,p_subject:expected.subject,p_body:expected.body,p_phone:expected.phone});
+  if(error || !data)throw new Error('No se pudo aprobar: revisá si cambió el borrador, si el contacto tiene permiso o si ya existe un envío en esta campaña.');
+  return (Array.isArray(data)?data[0]:data) as OutreachMessage;
 }
 
 /**
@@ -388,6 +343,8 @@ export async function applyInboundStatus(
   status: OutreachMessageStatus,
   providerMessageId?: string
 ): Promise<OutreachMessage> {
+  const {data:linked,error:linkedError}=await supabase.from('dispatch_jobs').select('id').eq('outreach_message_id',messageId).maybeSingle();
+  if(linkedError || linked)throw new Error('Este mensaje utiliza el contrato de receipts de la cola durable.');
   const fields: Record<string, unknown> = { status };
   if (providerMessageId) fields.provider_message_id = providerMessageId;
   if (status === "sent") fields.sent_at = new Date().toISOString();
@@ -396,6 +353,7 @@ export async function applyInboundStatus(
     .from("outreach_messages")
     .update(fields)
     .eq("id", messageId)
+    .eq("status", "queued")
     .select()
     .single();
 

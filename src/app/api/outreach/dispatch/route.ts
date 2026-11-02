@@ -1,27 +1,19 @@
-import { dispatchPitches, handleDispatchRequest } from "@/lib/outreachAutomation";
-
-export const dynamic = "force-dynamic";
-
-/**
- * Stage 1 of the automated WhatsApp sequence: posts the soft-CTA pitch for a
- * batch of Queued bizmap_leads to MAKE_DISPATCH_WEBHOOK_URL, then marks them
- * "Pitch Sent". Requires `Authorization: Bearer <OUTREACH_AUTOMATION_SECRET>`.
- *
- * Query params: limit (default 25, max 100), dry_run=1 (return the payload
- * without sending or updating anything), mobile_only=0 (also send to
- * landlines; by default only mobile numbers are sent), lead_ids=<uuid>,<uuid>
- * (only send to these bizmap_leads; ids that aren't Queued are ignored),
- * min_score=0-10 (lowest lead_score pitched; defaults to
- * OUTREACH_MIN_LEAD_SCORE, else 8; 0 sends regardless of score).
- */
-function handle(request: Request) {
-  return handleDispatchRequest(request, dispatchPitches, "/api/outreach/dispatch");
-}
-
-export async function GET(request: Request) {
-  return handle(request);
-}
-
-export async function POST(request: Request) {
-  return handle(request);
-}
+import { operator, withOperator } from '@/lib/security/auth';
+import { UUID } from '@/lib/security/policy';
+import { previewBatch } from '@/lib/durableDispatch';
+import { getSupabase } from '@/lib/supabase';
+export const POST=withOperator(async(request:Request)=>{
+ const user=await operator(); if(!user) return Response.json({error:'Acceso denegado'},{status:401});
+ const input=await request.json();
+ if(input.action==='preview') {
+  if(!['pitch_1','followup_2'].includes(input.stage??'pitch_1'))return Response.json({error:'Etapa inválida'},{status:400});
+  if(!Number.isInteger(input.limit) || input.limit<1 || input.limit>25) return Response.json({error:'Límite inválido'},{status:400});
+  return Response.json(await previewBatch(user.id,input.limit,input.stage??'pitch_1'));
+ }
+ if(input.action==='approve' && typeof input.batch_id==='string' && UUID.test(input.batch_id)) {
+  const {data,error}=await getSupabase().rpc('approve_dispatch',{p_batch:input.batch_id,p_operator:user.id});
+  if(error) return Response.json({error:'Lote vencido o inválido'},{status:409});
+  return Response.json({approved:data});
+ }
+ return Response.json({error:'Acción inválida'},{status:400});
+});

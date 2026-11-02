@@ -1,70 +1,29 @@
-import requests
+"""Google Places: consulta pequeña, configuración explícita y sin claves incrustadas."""
+import argparse
 import json
 import os
+import sys
+import time
+import requests
+from discovery_engine_osm import save_to_json
 
 def discover_leads(query):
-    """
-    Searches for businesses using the Google Places API (New) and extracts
-    key contact and reputation metrics.
-    """
-    url = "https://places.googleapis.com/v1/places:searchText"
-    
-    # Replace YOUR_API_KEY_HERE with your Google Places API Key
-    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "AIzaSyDDpt7wIW7mnGPQAFlbHtkMhhpsj2JTRDA")
-    
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.rating,places.userRatingCount"
-    }
-    
-    payload = {
-        "textQuery": query,
-        "languageCode": "en",
-        "maxResultCount": 10
-    }
-    
-    response = requests.post(url, headers=headers, json=payload)
-    
-    if response.status_code != 200:
-        print(f"Error fetching data: {response.status_code}")
-        print(response.text)
-        return []
-        
-    data = response.json()
-    places = data.get("places", [])
-    
-    leads = []
-    for place in places:
-        lead = {
-            "business_name": place.get("displayName", {}).get("text", "N/A"),
-            "address": place.get("formattedAddress", "N/A"),
-            "website": place.get("websiteUri", "N/A"),
-            "phone_number": place.get("nationalPhoneNumber", "N/A"),
-            "rating": place.get("rating", 0.0),
-            "review_count": place.get("userRatingCount", 0)
-        }
-        leads.append(lead)
-        
-    return leads
+    api_key=os.environ.get('GOOGLE_PLACES_API_KEY')
+    if not api_key:raise RuntimeError('Falta configuración de Google Places.')
+    start=time.monotonic()
+    headers={'Content-Type':'application/json','X-Goog-Api-Key':api_key,'X-Goog-FieldMask':'places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.rating,places.userRatingCount,places.location'}
+    with requests.post('https://places.googleapis.com/v1/places:searchText',headers=headers,json={'textQuery':query,'languageCode':'es','maxResultCount':10},timeout=(5,20),stream=True,allow_redirects=False) as response:
+        response.raise_for_status();chunks=[];size=0
+        for chunk in response.iter_content(65536):
+            size+=len(chunk)
+            if size>2097152 or time.monotonic()-start>25:raise RuntimeError('Respuesta fuera de límites.')
+            chunks.append(chunk)
+        data=json.loads(b''.join(chunks))
+    if not isinstance(data,dict) or not isinstance(data.get('places',[]),list):raise ValueError('Respuesta inválida.')
+    return [{'source_key':'google_places:'+p['id'],'source':'Google Places','business_name':p.get('displayName',{}).get('text'),'address':p.get('formattedAddress'),'website':p.get('websiteUri'),'phone_number':p.get('nationalPhoneNumber'),'latitude':p.get('location',{}).get('latitude'),'longitude':p.get('location',{}).get('longitude'),'source_metadata':{'rating':p.get('rating'),'review_count':p.get('userRatingCount'),'score_kind':'sin estimar'}} for p in data.get('places',[]) if isinstance(p,dict) and isinstance(p.get('id'),str)]
 
-def save_to_json(data, filename="leads.json"):
-    """
-    Exports the structured lead data to a JSON file.
-    """
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    print(f"Successfully saved {len(data)} leads to {filename}")
-
-if __name__ == "__main__":
-    search_query = "restaurants in San José"
-    print(f"Initializing Discovery Engine for: '{search_query}'...\n")
-    
-    extracted_leads = discover_leads(search_query)
-    
-    if extracted_leads:
-        save_to_json(extracted_leads)
-        print("\nSample Lead Extracted:")
-        print(json.dumps(extracted_leads[0], indent=2, ensure_ascii=False))
-    else:
-        print("No leads found or there was an error with the API request.")
+if __name__=='__main__':
+    parser=argparse.ArgumentParser();parser.add_argument('--query',required=True);parser.add_argument('--output',default='discovery-results.json');args=parser.parse_args()
+    try:
+        rows=discover_leads(args.query);save_to_json(rows,args.output);print(f'Guardados {len(rows)} registros.')
+    except Exception:print('Discovery incompleto; no se descartaron archivos anteriores.',file=sys.stderr);sys.exit(1)

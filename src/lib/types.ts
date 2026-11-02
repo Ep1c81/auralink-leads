@@ -67,7 +67,8 @@ export type OutreachMessageStatus =
   | "queued"
   | "sent"
   | "failed"
-  | "bounced";
+  | "bounced"
+  | "processing" | "transmitting" | "accepted" | "delivered" | "uncertain" | "suppressed";
 
 export interface OutreachCampaign {
   id: string;
@@ -95,7 +96,7 @@ export interface OutreachMessage {
 }
 
 export interface OutreachMessageWithLead extends OutreachMessage {
-  lead: Pick<Lead, "id" | "name" | "company" | "email"> | null;
+  lead: Pick<Lead, "id" | "name" | "company" | "email" | "phone"> | null;
 }
 
 export interface OutreachReply {

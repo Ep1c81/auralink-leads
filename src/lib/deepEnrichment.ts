@@ -1,3 +1,4 @@
+import { safeFetch } from '@/lib/security/safeFetch';
 import { supabase } from "@/lib/supabase";
 import type { Lead } from "@/lib/types";
 
@@ -15,9 +16,6 @@ import type { Lead } from "@/lib/types";
  */
 
 const CONTACT_PATHS = ["/contact", "/contacto", "/about-us", "/about"];
-const FETCH_TIMEOUT_MS = 3000;
-const MAX_HTML_CHARS = 500_000;
-const USER_AGENT = "prospect-lead-engine/1.0 (lead enrichment)";
 const PLACEHOLDER_EMAIL = "no-email@placeholder.local";
 
 // Costa Rica is this pipeline's default target market (see CR_COUNTRY_CODE /
@@ -86,21 +84,7 @@ function extractFromHtml(html: string): PageContacts {
 
 /** Fetches one URL and returns its HTML, or null on any failure — never throws. */
 async function fetchHtml(url: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: { "User-Agent": USER_AGENT },
-      signal: controller.signal,
-      redirect: "follow",
-    });
-    if (!response.ok) return null;
-    return (await response.text()).slice(0, MAX_HTML_CHARS);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
+  try { const response = await safeFetch(url); return response.ok ? await response.text() : null; } catch { return null; }
 }
 
 async function markStatus(leadId: string, status: "failed"): Promise<Lead | null> {
@@ -187,13 +171,13 @@ export async function deepEnrichLead(
       .single();
 
     if (error || !updatedLead) {
-      console.error(`[deepEnrichment] failed to save enrichment for lead ${leadId}:`, error);
+      console.error("deepEnrichment.ts: operación registrada");
       return null;
     }
 
     return updatedLead as Lead;
-  } catch (err) {
-    console.error(`[deepEnrichment] unexpected error enriching lead ${leadId}:`, err);
+  } catch {
+    console.error("deepEnrichment.ts: operación registrada");
     return await markStatus(leadId, "failed");
   }
 }

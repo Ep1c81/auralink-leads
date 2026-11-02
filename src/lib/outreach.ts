@@ -1,3 +1,4 @@
+import { reserveAI } from "@/lib/resourceBudget";
 import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "@/lib/supabase";
 import type { BantQualification, Lead, OutreachContent, WebEnrichment } from "@/lib/types";
@@ -110,11 +111,9 @@ export async function generateOutreach(
   lead: Lead,
   options?: OutreachOfferingOptions
 ): Promise<OutreachContent> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.error(
-      `[outreach] ANTHROPIC_API_KEY is not set, using fallback for lead ${lead.id}`
-    );
+  const apiKey = process.env.AI_ENABLED === "true" ? process.env.ANTHROPIC_API_KEY : undefined;
+  if (!apiKey || !await reserveAI()) {
+    console.error("outreach.ts: operación registrada");
     return buildFallbackOutreach(lead, options?.fallbackOfferingEs);
   }
 
@@ -151,11 +150,8 @@ export async function generateOutreach(
       email_subject: input.email_subject,
       email_body: input.email_body,
     };
-  } catch (err) {
-    console.error(
-      `[outreach] Claude generation failed for lead ${lead.id}, using fallback:`,
-      err
-    );
+  } catch {
+    console.error("outreach.ts: operación registrada");
     return buildFallbackOutreach(lead, options?.fallbackOfferingEs);
   }
 }

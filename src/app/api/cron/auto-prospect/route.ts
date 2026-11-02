@@ -1,3 +1,4 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { runAutoProspectSweep } from "@/lib/autoProspect";
 
@@ -24,10 +25,13 @@ async function handleSweepRequest() {
   return NextResponse.json(result);
 }
 
-export async function POST() {
+async function handlePOST() {
   return handleSweepRequest();
 }
 
-export async function GET() {
-  return handleSweepRequest();
+async function handleGET() {
+  return NextResponse.json({ error: "Usá POST para iniciar una búsqueda." }, { status: 405 });
 }
+
+export const POST = withOperator(handlePOST);
+export const GET = withOperator(handleGET);

@@ -1,7 +1,8 @@
+import { withOperator } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { getMessage, updateDraftMessage } from "@/lib/outreachCampaigns";
 
-export async function GET(
+async function handleGET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -15,7 +16,7 @@ export async function GET(
   return NextResponse.json({ message });
 }
 
-export async function PATCH(
+async function handlePATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -34,9 +35,12 @@ export async function PATCH(
     const message = await updateDraftMessage(id, fields);
     return NextResponse.json({ message });
   } catch (err) {
-    console.error(`[outreach] failed to update message ${id}:`, err);
+    console.error("route.ts: operación registrada");
     const errMessage = err instanceof Error ? err.message : String(err);
     const status = errMessage === "Message not found" ? 404 : 400;
     return NextResponse.json({ error: errMessage }, { status });
   }
 }
+
+export const GET = withOperator(handleGET);
+export const PATCH = withOperator(handlePATCH);

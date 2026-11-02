@@ -1,0 +1,4 @@
+requests>=2.32,<3
+python-dotenv>=1,<2
+supabase>=2,<3
+anthropic>=0.40,<2

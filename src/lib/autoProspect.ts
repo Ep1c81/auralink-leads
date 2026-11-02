@@ -28,7 +28,7 @@ const REPUTATION_SHIELD_OFFERING_EN =
 // src/lib/outreach.ts splices this into "ayuda a negocios como X a ___", so
 // it must read as a continuation of "to ___", not "to our ___".
 const REPUTATION_SHIELD_OFFERING_ES =
-  "blindar su reputación en Google con standees NFC que dejan una reseña de 5 estrellas en un solo toque, junto con atención al cliente por WhatsApp";
+  "blindar su reputación en Google con standees NFC que facilitan abrir el enlace para escribir una reseña honesta, junto con atención al cliente por WhatsApp";
 
 function buildReputationShieldContextNote(lead: Lead): string {
   const category =
@@ -40,7 +40,7 @@ function buildReputationShieldContextNote(lead: Lead): string {
   const ratingNote =
     typeof rating === "number"
       ? `Google rating ${rating.toFixed(1)} (${typeof reviewCount === "number" ? reviewCount : 0} reviews)`
-      : "no Google rating on file (few or no reviews)";
+      : "calificación de Google desconocida";
 
   return `Business name: ${lead.name ?? lead.company ?? "unknown"}. Category: ${category}. City: ${AUTO_PROSPECT_LOCATION}. This business was sourced by an automated sweep specifically because of a low Google rating or thin review count (${ratingNote}) — evaluate it as a target for a "Reputation Shield" NFC review tap standee plus WhatsApp customer engagement.`;
 }
@@ -129,7 +129,7 @@ async function sweepNiche(niche: string): Promise<NicheSweepResult> {
       });
       result.outreachGenerated++;
     } catch (err) {
-      console.error(`[auto-prospect] failed processing lead ${lead.id}:`, err);
+      console.error("autoProspect.ts: operación registrada");
       result.errors.push(`Lead ${lead.id} (${lead.name ?? "unnamed"}): ${err}`);
     }
 

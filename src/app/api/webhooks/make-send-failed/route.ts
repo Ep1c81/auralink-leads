@@ -1,3 +1,4 @@
+import { withMachine } from '@/lib/security/auth';
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { checkAutomationAuth, type BizmapOutreachStatus } from "@/lib/outreachAutomation";
@@ -27,14 +28,14 @@ const RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
  * retry_date tomorrow. alt_contact is never touched. Requires
  * `Authorization: Bearer <OUTREACH_AUTOMATION_SECRET>`.
  */
-export async function POST(request: Request) {
+async function guardedPOST(request: Request) {
   const unauthorized = checkAutomationAuth(request);
   if (unauthorized) return unauthorized;
 
   const body = await request.json().catch(() => null);
   const leadId = typeof body?.lead_id === "string" ? body.lead_id.trim() : "";
   const rawPhone = typeof body?.phone === "string" ? body.phone : "";
-  const errorMessage = typeof body?.error_message === "string" ? body.error_message : "";
+
 
   const waPhone = formatWhatsAppNumber(rawPhone);
   if (!leadId && !waPhone) {
@@ -82,12 +83,12 @@ export async function POST(request: Request) {
       .eq("has_replied", false);
     if (updateError) throw new Error(updateError.message);
 
-    console.log(
-      `[/api/webhooks/make-send-failed] ${status}: ${leads.map((l) => l.business_name).join(", ")}: ${errorMessage.slice(0, 200)}`
-    );
+    console.log("route.ts: operación registrada");
     return NextResponse.json({ updated: leads.map((l) => l.id), outreach_status: status });
-  } catch (err) {
-    console.error("[/api/webhooks/make-send-failed] failed to record send failure:", err);
+  } catch {
+    console.error("route.ts: operación registrada");
     return NextResponse.json({ error: "Failed to record send failure" }, { status: 502 });
   }
 }
+
+export const POST = withMachine(guardedPOST,"OUTREACH_AUTOMATION_SECRET","authorization","Bearer ");
