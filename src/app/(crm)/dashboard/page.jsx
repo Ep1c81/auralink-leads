@@ -10,20 +10,21 @@ import {
   OUTREACH_STAGES,
 } from "@/lib/whatsapp";
 
+import { CommercialDetails } from "@/components/CommercialDetails";
 const PAGE_SIZE = 50;
 // "Contacted, nothing further tracked, N days later" — a coarse proxy for
 // follow-up, since bizmap_leads has no reply/reminder tracking of its own.
 const FOLLOW_UP_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
-async function fetchBizmapLeads() {
-  const res = await fetch("/api/bizmap-leads");
+async function fetchBizmapLeads(query, signal) {
+  const res = await fetch(`/api/bizmap-leads?${query}`, {signal});
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const detail =
       body?.details && typeof body.details !== "string" ? JSON.stringify(body.details) : body?.details;
     throw new Error([body?.error, detail].filter(Boolean).join(": ") || `Request failed (${res.status})`);
   }
-  return body?.leads ?? [];
+  return body;
 }
 
 function isFollowUpNeeded(lead) {
@@ -36,17 +37,17 @@ function isFollowUpNeeded(lead) {
 const FILTERS = [
   {
     key: "contactable",
-    label: "Has WhatsApp / Phone",
+    label: "Con teléfono registrado",
     test: (lead) => Boolean(formatWhatsAppNumber(lead.phone_number)),
   },
   {
     key: "noWebsite",
-    label: "No Website (High Priority Prospect)",
+    label: "Sin sitio web registrado",
     test: (lead) => lead.website === "N/A",
   },
   {
     key: "followUp",
-    label: "Follow-up Needed",
+    label: "Seguimiento pendiente",
     test: isFollowUpNeeded,
   },
 ];
@@ -79,6 +80,9 @@ function StatusBadge({ status }) {
 
 export default function LeadDashboard() {
   const [leads, setLeads] = useState([]);
+  const [page, setPage] = useState(0), [total, setTotal] = useState(0), [version, setVersion] = useState(0);
+  const [zone,setZone] = useState(''), [category,setCategory] = useState(''), [commercialStatus,setCommercialStatus] = useState(''), [due,setDue] = useState(false);
+  const query = new URLSearchParams({page:String(page),zone,category,status:commercialStatus,due:due?'1':'0'}).toString();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeFilters, setActiveFilters] = useState(() => new Set());
@@ -95,10 +99,10 @@ export default function LeadDashboard() {
   // after the effect re-runs (or the component unmounts) never clobbers
   // newer state — mirrors the fetch effect in src/app/page.tsx.
   useEffect(() => {
-    let cancelled = false;
-    fetchBizmapLeads()
+    let cancelled = false; const controller = new AbortController();
+    fetchBizmapLeads(query, controller.signal)
       .then((data) => {
-        if (!cancelled) setLeads(data);
+        if (!cancelled) {setLeads(data.leads);setTotal(data.total);}
       })
       .catch((err) => {
         console.error("Error fetching bizmap leads:", err);
@@ -108,21 +112,11 @@ export default function LeadDashboard() {
         if (!cancelled) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      cancelled = true; controller.abort();
     };
-  }, []);
+  }, [query, version]);
 
-  const handleRefresh = () => {
-    setLoading(true);
-    setError(null);
-    fetchBizmapLeads()
-      .then(setLeads)
-      .catch((err) => {
-        console.error("Error fetching bizmap leads:", err);
-        setError(err.message);
-      })
-      .finally(() => setLoading(false));
-  };
+  const handleRefresh = () => { setLoading(true); setError(null); setVersion(v=>v+1); };
 
   const metrics = useMemo(
     () => ({
@@ -164,7 +158,7 @@ export default function LeadDashboard() {
     });
     window.open(buildWhatsAppUrl(waNumber, message), "_blank", "noopener,noreferrer");
 
-    if (lead.outreached_at) return; // already tracked — don't re-stamp on repeat clicks
+    if (lead.outreached_at || !window.confirm("¿Confirmás que realizaste el contacto? Abrir WhatsApp no confirma un envío.")) return;
 
     setPendingOutreachIds((prev) => new Set(prev).add(lead.id));
     try {
@@ -199,6 +193,7 @@ export default function LeadDashboard() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          bizmap_lead_id: lead.id,
           name: lead.business_name,
           company: lead.business_name,
           phone: lead.phone_number,
@@ -230,7 +225,15 @@ export default function LeadDashboard() {
   };
 
   return (
-    <main className="p-8 max-w-7xl mx-auto">
+    <main className="p-4 sm:p-8 max-w-7xl mx-auto">
+      <section className="flex flex-wrap gap-3 mb-4" aria-label="Filtros de oportunidades">
+      <label>Zona<input className="block border p-2" value={zone} onChange={e=>{setZone(e.target.value);setPage(0);}} /></label>
+      <label>Categoría<input className="block border p-2" value={category} onChange={e=>{setCategory(e.target.value);setPage(0);}} /></label>
+      <label>Estado<select className="block border p-2" value={commercialStatus} onChange={e=>{setCommercialStatus(e.target.value);setPage(0);}}><option value="">Todos</option><option value="new">Nuevo</option><option value="contacted">Contactado</option><option value="replied">Respondió</option><option value="won">Ganado</option><option value="lost">Perdido</option></select></label>
+      <label><input type="checkbox" checked={due} onChange={e=>{setDue(e.target.checked);setPage(0);}} /> Seguimiento pendiente</label>
+      </section>
+      <nav className="flex gap-4 mb-4" aria-label="Paginación"><button disabled={page===0||loading} onClick={()=>setPage(p=>p-1)}>Anterior</button><span>Página {page+1} · {total} oportunidades</span><button disabled={(page+1)*50>=total||loading} onClick={()=>setPage(p=>p+1)}>Siguiente</button></nav>
+      <p className="mb-4">La prioridad es una estimación. Los indicadores y filtros rápidos de abajo corresponden a esta página.</p>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-3xl font-bold text-gray-900 dark:text-zinc-50">Auralink Digital CRM Pipeline</h1>
         <button
@@ -238,19 +241,19 @@ export default function LeadDashboard() {
           disabled={loading}
           className="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 disabled:opacity-50"
         >
-          {loading ? "Refreshing…" : "Refresh"}
+          {loading ? "Actualizando…" : "Actualizar"}
         </button>
       </div>
 
       <div className="flex flex-wrap gap-4 mb-6">
-        <StatTile label="Total leads" value={metrics.total.toLocaleString()} />
+        <StatTile label="Prospectos en esta página" value={metrics.total.toLocaleString()} />
         <StatTile
-          label="Contactable leads (Phone/WhatsApp ready)"
+          label="Con teléfono (permiso por revisar)"
           value={metrics.contactable.toLocaleString()}
           valueClassName="text-emerald-600 dark:text-emerald-400"
         />
         <StatTile
-          label="Outreached leads"
+          label="Contactos registrados"
           value={metrics.outreached.toLocaleString()}
           valueClassName="text-blue-600 dark:text-blue-400"
         />
@@ -336,7 +339,7 @@ export default function LeadDashboard() {
                           className="border-b border-gray-100 dark:border-zinc-800 hover:bg-gray-50 dark:hover:bg-zinc-800/50"
                         >
                           <td className="p-4 font-medium text-gray-900 dark:text-zinc-50">
-                            {lead.business_name || "Unnamed"}
+                            {lead.business_name || "Sin nombre"}<CommercialDetails lead={lead} onSaved={handleRefresh} />
                           </td>
                           <td className="p-4 text-blue-600 dark:text-blue-400 font-semibold">
                             {lead.business_type || "N/A"}
@@ -356,7 +359,7 @@ export default function LeadDashboard() {
                               </a>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
-                                No website
+                                Sin dato de sitio web
                               </span>
                             )}
                           </td>

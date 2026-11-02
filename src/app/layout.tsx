@@ -4,9 +4,9 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 const NAV_LINKS = [
-  { href: "/", label: "Home" },
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/outreach", label: "Outreach" },
+  { href: "/", label: "Inicio" },
+  { href: "/dashboard", label: "Prospectos" },
+  { href: "/outreach", label: "Campañas" },
 ] as const;
 
 const geistSans = Geist({
@@ -27,10 +27,10 @@ export const metadata: Metadata = {
   description: "Lead pipeline and WhatsApp outreach for AuraLink Digital",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
-      lang="en"
+      lang="es-CR"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">

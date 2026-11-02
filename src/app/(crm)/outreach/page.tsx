@@ -1,3 +1,6 @@
+import Link from "next/link";
+import { pageNumber } from "@/lib/pagination";
+import { QueueStatus } from "@/components/QueueStatus";
 import { listCampaigns } from "@/lib/outreachCampaigns";
 import { CampaignCard } from "@/components/outreach/CampaignCard";
 import { CampaignTable } from "@/components/outreach/CampaignTable";
@@ -16,22 +19,25 @@ import { body, eyebrow, pageTitle } from "@/components/outreach/theme";
 export default async function OutreachPage({
   searchParams,
 }: {
-  searchParams: Promise<{ draftLead?: string; draftLeadName?: string }>;
+  searchParams: Promise<{ draftLead?: string; draftLeadName?: string; page?: string }>;
 }) {
-  const { draftLead, draftLeadName } = await searchParams;
-  const campaigns = await listCampaigns();
+  const { draftLead, draftLeadName, page: rawPage } = await searchParams;
+  const page=pageNumber(rawPage);
+  const campaigns = await listCampaigns(page);
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-10 sm:px-6 lg:py-14">
       <header>
         <p className={eyebrow}>AuraLink Digital · Outreach</p>
-        <h1 className={pageTitle}>Campaigns</h1>
+        <h1 className={pageTitle}>Campañas</h1>
         <p className={`mt-1.5 ${body}`}>
-          Review WhatsApp message drafts for your leads before they go out.
+          Revisá los borradores y destinatarios antes de aprobar un lote.
         </p>
       </header>
 
+      <nav className="flex gap-4" aria-label="Paginación de campañas">{page>0&&<Link href={`/outreach?page=${page-1}`}>Anterior</Link>}<span>Página {page+1}</span>{campaigns.length===50&&<Link href={`/outreach?page=${page+1}`}>Siguiente</Link>}</nav>
       <DispatchPanel />
+      <QueueStatus />
 
       {draftLead && (
         <DraftLeadPanel

@@ -1,3 +1,7 @@
+from datetime import datetime, timezone
+from pathlib import Path
+import hashlib
+import argparse
 """
 B2B lead generator for Google Maps reputation-management outreach.
 
@@ -47,7 +51,7 @@ def build_query(bbox):
     south, west, north, east = bbox
     tag_regex = "|".join(TARGET_TAGS)
     return f"""
-    [out:json][timeout:60];
+    [out:json][timeout:20];
     (
       node["amenity"~"^({tag_regex})$"]({south},{west},{north},{east});
       way["amenity"~"^({tag_regex})$"]({south},{west},{north},{east});
@@ -62,23 +66,27 @@ def build_query(bbox):
 
 
 def fetch_location(name, bbox, retries=3):
-    query = build_query(bbox)
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(OVERPASS_URL, data=query.encode("utf-8"), headers=HEADERS, timeout=90)
-        except requests.RequestException as exc:
-            print(f"  [{name}] request failed (attempt {attempt}/{retries}): {exc}")
-            time.sleep(5)
-            continue
-
-        if resp.status_code == 200:
-            return resp.json().get("elements", [])
-
-        print(f"  [{name}] Overpass returned {resp.status_code} (attempt {attempt}/{retries})")
-        time.sleep(5)
-
-    print(f"  [{name}] giving up after {retries} attempts.")
-    return []
+    query=build_query(bbox)
+    directory=Path('.discovery-checkpoints');directory.mkdir(exist_ok=True)
+    checkpoint=directory/(hashlib.sha256(query.encode()).hexdigest()+'.json')
+    if checkpoint.exists():return json.loads(checkpoint.read_text())['elements']
+    for attempt in range(retries):
+        start=time.monotonic()
+        with requests.post(OVERPASS_URL,data=query.encode(),headers=HEADERS,timeout=(5,25),stream=True,allow_redirects=False) as response:
+            if response.status_code in (429,503,504):
+                raw=response.headers.get('Retry-After','0');delay=max(2**attempt,int(raw) if raw.isdigit() else 60)
+                if delay>30 or attempt==retries-1:raise RuntimeError('Discovery parcial; proveedor ocupado.')
+                time.sleep(delay);continue
+            response.raise_for_status();chunks=[];size=0
+            for chunk in response.iter_content(65536):
+                size+=len(chunk)
+                if size>2097152 or time.monotonic()-start>30:raise RuntimeError('Respuesta fuera de límites.')
+                chunks.append(chunk)
+            data=json.loads(b''.join(chunks))
+            if not isinstance(data,dict) or not isinstance(data.get('elements'),list):raise ValueError('Discovery malformado.')
+            temp=checkpoint.with_suffix('.tmp');temp.write_text(json.dumps(data));temp.replace(checkpoint)
+            return data['elements']
+    raise RuntimeError('Discovery incompleto.')
 
 
 def classify_tag(tags):
@@ -99,13 +107,7 @@ def normalize_phone(tags):
 
 
 def has_whatsapp(tags, phone):
-    if tags.get("contact:whatsapp") or tags.get("whatsapp"):
-        return "Yes"
-    # Costa Rica mobile numbers (leading 6, 7, or 8) are commonly WhatsApp-reachable.
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if len(digits) >= 8 and digits[-8] in ("6", "7", "8"):
-        return "Likely"
-    return "No" if phone else "Unknown"
+    return "Declarado en la fuente; por verificar" if tags.get('contact:whatsapp') or tags.get('whatsapp') else "Sin verificar"
 
 
 def build_pitch(base_pitch, has_website, has_phone, name):
@@ -117,11 +119,11 @@ def build_pitch(base_pitch, has_website, has_phone, name):
     return angle
 
 
-def collect_prospects():
+def collect_prospects(locations=None):
     all_rows = []
     seen = set()
 
-    for loc_name, bbox in LOCATIONS.items():
+    for loc_name, bbox in (locations or dict(list(LOCATIONS.items())[:1])).items():
         print(f"Querying Overpass for {loc_name}...")
         elements = fetch_location(loc_name, bbox)
         print(f"  -> {len(elements)} raw elements returned")
@@ -138,11 +140,8 @@ def collect_prospects():
             raw_tag, category, base_pitch = category_info
 
             phone = normalize_phone(tags)
-            if not phone:
-                # Filtering logic requires valid contact info — skip businesses without a phone.
-                continue
-
-            dedupe_key = (name.strip().lower(), loc_name)
+            if elem.get('type') not in ('node','way','relation') or not isinstance(elem.get('id'),int):continue
+            dedupe_key = (elem['type'],elem['id'])
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -158,11 +157,15 @@ def collect_prospects():
                 "Canton/Location": loc_name,
                 "Phone": phone,
                 "WhatsApp Ready": whatsapp_ready,
-                "Website Present (Yes/No)": "Yes" if has_website else "No",
+                "Website Present (Yes/No)": "Sí" if has_website else "Sin dato",
                 "Google Review Pitch Angle": pitch,
                 # Raw fields, kept alongside the human-facing CSV columns above
                 # so the Supabase export doesn't lose the actual website URL
                 # behind a Yes/No flag.
+                "_source_key": f"osm_{elem['type']}_{elem['id']}",
+                "_latitude": elem.get('lat',elem.get('center',{}).get('lat')),
+                "_longitude": elem.get('lon',elem.get('center',{}).get('lon')),
+                "_address": {k:v for k,v in tags.items() if k.startswith('addr:')},
                 "_raw_tag": raw_tag,
                 "_raw_website": website,
             })
@@ -199,13 +202,16 @@ def save_bizmap_json(rows, filename="gmaps_review_prospects_bizmap.json"):
     for r in rows:
         website = r["_raw_website"] or "N/A"
         records.append({
+            "source_key": r["_source_key"],
+            "latitude": r["_latitude"], "longitude": r["_longitude"],
+            "discovered_at": datetime.now(timezone.utc).isoformat(),
+            "source_metadata": {"address_tags":r["_address"],"attribution":"© OpenStreetMap contributors, ODbL","score_kind":"sin estimar"},
             "business_name": r["Business Name"],
             "business_type": r["_raw_tag"],
             "address": r["Canton/Location"],
             "website": website,
             "phone_number": r["Phone"],
             "source": "OpenStreetMap-CR-Cantons",
-            "needs_website": website == "N/A",
             "status": "New",
             "lead_score": 0,
             "ai_notes": r["Google Review Pitch Angle"],
@@ -217,7 +223,10 @@ def save_bizmap_json(rows, filename="gmaps_review_prospects_bizmap.json"):
 
 
 def main():
-    rows = collect_prospects()
+    parser=argparse.ArgumentParser(description='Reporte OSM de una zona configurada; no implica cobertura nacional.')
+    parser.add_argument('--location',choices=list(LOCATIONS),required=True)
+    args=parser.parse_args()
+    rows = collect_prospects({args.location:LOCATIONS[args.location]})
     if not rows:
         print("No prospects with valid contact info were found. Nothing written.")
         sys.exit(1)
@@ -238,4 +247,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:main()
+    except Exception:
+        print('Discovery incompleto; los checkpoints anteriores se conservan.',file=sys.stderr)
+        sys.exit(1)

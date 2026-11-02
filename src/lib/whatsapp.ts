@@ -64,7 +64,7 @@ function buildFollowUpMessage(businessName?: string | null): string {
   const name = businessName?.trim() || "su negocio";
   return `Estimado/a ${name},
 
-Le escribimos hace unos días desde BizMapShield sobre cómo ayudar a su negocio a destacar en Google Maps y multiplicar sus reseñas de 5 estrellas.
+Le escribimos hace unos días desde BizMapShield sobre cómo ayudar a su negocio a facilitar que sus clientes compartan reseñas honestas en Google.
 
 Sabemos que su agenda es muy ocupada, así que queríamos dar seguimiento por si el mensaje anterior se le pasó.
 
@@ -80,11 +80,11 @@ function buildPitchMessage(businessName?: string | null, canton?: string | null)
 
   return `Estimado/a ${name},
 
-Le escribimos desde BizMapShield, la solución costarricense que ayuda a negocios locales como el suyo en ${zone} a destacar en Google Maps y multiplicar sus reseñas de 5 estrellas.
+Le escribimos desde BizMapShield, la solución costarricense que ayuda a negocios locales como el suyo en ${zone} a facilitar que sus clientes compartan reseñas honestas en Google.
 
-Sabemos que su reputación es su activo más valioso. Nuestro sistema convierte cada visita en una reseña automática, sin que usted tenga que pedir nada.
+Sabemos que su reputación es su activo más valioso. Nuestro sistema facilita abrir el enlace de reseñas con una tarjeta NFC o un código QR. Cada cliente decide si desea publicar su experiencia.
 
-Si desea conocer más sobre cómo podemos ayudarle a dominar su zona, puede:
+Si desea conocer más sobre cómo podemos ayudarle a mejorar su presencia digital, puede:
 
 💬 Responder directamente a este mensaje
 ✉️ Escribirnos a nuestro correo oficial: premium@auralinkdigital.com

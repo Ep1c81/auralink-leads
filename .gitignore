@@ -43,3 +43,10 @@ next-env.d.ts
 
 # python
 __pycache__/
+
+.discovery-checkpoints/
+discovery-results.json
+.venv/
+__pycache__/
+
+outreach-drafts.json

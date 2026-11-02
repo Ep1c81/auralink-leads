@@ -1,98 +1,29 @@
+"""Importa identidades OSM sin fusionar sucursales ni descartar contactos incompletos."""
 import json
 import os
 import sys
-
+from pathlib import Path
 from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import create_client
 
-from discovery_engine_osm import drop_leads_without_phone
+def push_to_supabase(json_file_path='discovery-results.json'):
+    load_dotenv('.env.local')
+    url,key=os.environ.get('SUPABASE_URL'),os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    if not url or not key: raise RuntimeError('Configuración incompleta.')
+    rows=json.loads(Path(json_file_path).read_text(encoding='utf8'))
+    if not isinstance(rows,list) or len(rows)>1000: raise ValueError('Lote inválido.')
+    allowed={'source_key','business_name','business_type','address','phone_number','website','source','latitude','longitude','discovered_at','lead_score','source_metadata'}
+    for row in rows:
+        if not isinstance(row,dict) or not row.get('source_key'): raise ValueError('Falta identidad de fuente; reconciliá el archivo anterior antes de importarlo.')
+    db=create_client(url,key)
+    for offset in range(0,len(rows),100):
+        batch=[{k:v for k,v in row.items() if k in allowed} for row in rows[offset:offset+100]]
+        # Reejecución segura: conserva las notas/scoring del CRM y no pisa filas existentes.
+        db.table('bizmap_leads').upsert(batch,on_conflict='source_key',ignore_duplicates=True).execute()
+        print(f'Lote guardado: {offset+len(batch)} de {len(rows)}.')
 
-load_dotenv(".env.local")
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-DEDUPE_COLUMNS = ("business_name", "business_type", "address", "phone_number", "website")
-
-
-def push_to_supabase(json_file_path="leads.json"):
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        print("Error: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not found in .env.local.")
-        print("bizmap_leads has RLS enabled with no anon insert policy, so a service-role key is required to write.")
+if __name__=='__main__':
+    try:push_to_supabase(sys.argv[1] if len(sys.argv)>1 else 'discovery-results.json')
+    except Exception:
+        print('Importación incompleta. Reintentá el mismo archivo; los lotes guardados no se duplican.',file=sys.stderr)
         sys.exit(1)
-
-    # Service-role key bypasses RLS for server-side writes, same as the app's API routes.
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
-    try:
-        with open(json_file_path, "r", encoding="utf-8") as f:
-            leads_data = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: Could not find {json_file_path}")
-        return
-
-    print(f"Found {len(leads_data)} leads in {json_file_path}.")
-
-    # Only leads with a usable phone number go to bizmap_leads; a leads.json
-    # from an older run may still contain "N/A" or blank phones.
-    cleaned = drop_leads_without_phone(leads_data)
-    print(f"Dropped {len(leads_data) - len(cleaned)} leads with no phone number.")
-    leads_data = cleaned
-
-    # bizmap_leads has no unique constraint, and a prior migration already had
-    # to purge ~16k exact-duplicate rows from earlier scraper runs. Dedupe
-    # against what's already in the table before inserting anything new.
-    # PostgREST caps a single select at 1000 rows, so page through the table.
-    existing_keys = set()
-    page_size = 1000
-    offset = 0
-    while True:
-        page = (
-            supabase.table("bizmap_leads")
-            .select(",".join(DEDUPE_COLUMNS))
-            .order("id")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        existing_keys.update(tuple(row.get(col) for col in DEDUPE_COLUMNS) for row in page.data)
-        if len(page.data) < page_size:
-            break
-        offset += page_size
-    print(f"Found {len(existing_keys)} existing rows in bizmap_leads for dedupe.")
-
-    new_rows = []
-    skipped = 0
-    for lead in leads_data:
-        key = tuple(lead.get(col) for col in DEDUPE_COLUMNS)
-        if key in existing_keys:
-            skipped += 1
-            continue
-        existing_keys.add(key)  # guard against duplicates within the input file itself
-        new_rows.append(lead)
-
-    print(f"{len(new_rows)} new rows to insert ({skipped} already present, skipped).")
-
-    if not new_rows:
-        print("Nothing new to upload.")
-        return
-
-    # Rows are inserted as-is, so the AI lead_score that discovery_engine_osm.py
-    # writes into leads.json lands in bizmap_leads.lead_score (the column the
-    # dashboard sorts by). Unscored rows fall back to the column default of 0.
-    batch_size = 500
-    inserted = 0
-    for i in range(0, len(new_rows), batch_size):
-        batch = new_rows[i:i + batch_size]
-        try:
-            supabase.table("bizmap_leads").insert(batch).execute()
-            inserted += len(batch)
-            print(f"Uploaded batch {i // batch_size + 1} (rows {i} to {i + len(batch)})")
-        except Exception as e:
-            print(f"Error uploading batch {i // batch_size + 1}: {e}")
-
-    print(f"\nDone. Inserted {inserted} new rows into bizmap_leads ({skipped} duplicates skipped).")
-
-
-if __name__ == "__main__":
-    json_path = sys.argv[1] if len(sys.argv) > 1 else "leads.json"
-    push_to_supabase(json_path)
