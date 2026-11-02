@@ -1,44 +1,37 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { applyInboundStatus } from "@/lib/outreachCampaigns";
-import type { OutreachMessageStatus } from "@/lib/types";
+import { jsonError, newRequestId, parseJsonBody, RequestValidationError } from "@/lib/http";
+import { requireMachine } from "@/lib/machineAuth";
 
-const VALID_STATUSES: OutreachMessageStatus[] = ["sent", "failed", "bounced"];
+const schema = z.object({
+  message_id: z.string().uuid(),
+  status: z.enum(["sent", "failed", "bounced"]),
+  provider_message_id: z.string().trim().max(200).optional(),
+});
 
 /**
- * n8n calls this after a send attempt to update outreach_messages.status and
- * provider_message_id. Requires a shared-secret header (OUTREACH_STATUS_SECRET)
- * — requests without a matching header are rejected before touching the DB.
+ * n8n informa el resultado de un correo (outreach_messages). Exige el
+ * encabezado `x-outreach-secret` (OUTREACH_STATUS_SECRET). Los estados no
+ * retroceden: ver applyInboundStatus.
  */
 export async function POST(request: Request) {
-  const expectedSecret = process.env.OUTREACH_STATUS_SECRET;
-  if (!expectedSecret) {
-    console.error("[outreach-status] OUTREACH_STATUS_SECRET not configured; rejecting request");
-    return NextResponse.json({ error: "Endpoint not configured" }, { status: 503 });
-  }
+  const denied = requireMachine(request, ["OUTREACH_STATUS_SECRET"], { header: "x-outreach-secret" });
+  if (denied) return denied;
+  const requestId = newRequestId();
 
-  const providedSecret = request.headers.get("x-outreach-secret");
-  if (providedSecret !== expectedSecret) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const body = await request.json().catch(() => null);
-  const messageId = body?.message_id;
-  const status = body?.status;
-  const providerMessageId =
-    typeof body?.provider_message_id === "string" ? body.provider_message_id : undefined;
-
-  if (typeof messageId !== "string" || !VALID_STATUSES.includes(status)) {
-    return NextResponse.json(
-      { error: `message_id (string) and status (${VALID_STATUSES.join("|")}) are required` },
-      { status: 400 }
-    );
+  let body: z.infer<typeof schema>;
+  try {
+    body = await parseJsonBody(request, schema, 4096);
+  } catch (err) {
+    if (err instanceof RequestValidationError) return jsonError(err.status, err.message, requestId);
+    throw err;
   }
 
   try {
-    const message = await applyInboundStatus(messageId, status, providerMessageId);
+    const message = await applyInboundStatus(body.message_id, body.status, body.provider_message_id);
     return NextResponse.json({ message });
   } catch (err) {
-    console.error(`[outreach-status] failed to update message ${messageId}:`, err);
-    return NextResponse.json({ error: "Failed to update message" }, { status: 502 });
+    return jsonError(502, "No se pudo actualizar el mensaje", requestId, err);
   }
 }

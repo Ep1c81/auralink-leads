@@ -1,34 +1,50 @@
 import { NextResponse } from "next/server";
+import { requireOperatorApi } from "@/lib/auth";
+import { z } from "zod";
+import { jsonError, parseJsonBody, RequestValidationError } from "@/lib/http";
+import { withJobLock } from "@/lib/jobLock";
 import {
   importDiscoveredBusinesses,
   isLowRatingTarget,
   searchBusinesses,
 } from "@/lib/discovery";
 
-interface ProspectingPayload {
-  industry: string;
-  location: string;
-  limit?: number;
-  /** Keep only businesses rated under 4.2, or with fewer than 15 reviews —
-   *  prime targets for review management / tap standee outreach. */
-  lowRatingOnly?: boolean;
-}
+const schema = z.object({
+  industry: z.string().trim().min(2).max(80),
+  location: z.string().trim().min(2).max(120),
+  limit: z.number().int().min(1).max(20).optional(),
+  /** Solo negocios con calificación < 4.2 o < 15 reseñas en el proveedor. */
+  lowRatingOnly: z.boolean().optional(),
+});
+type ProspectingPayload = z.infer<typeof schema>;
+
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   let payload: ProspectingPayload;
   try {
-    payload = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    payload = await parseJsonBody(request, schema, 2048);
+  } catch (err) {
+    if (err instanceof RequestValidationError) {
+      return jsonError(err.status, "Indique una categoría y una zona válidas", requestId);
+    }
+    throw err;
   }
 
-  if (!payload.industry || !payload.location) {
-    return NextResponse.json(
-      { error: "`industry` and `location` are required" },
-      { status: 400 }
-    );
+  // Evita que dos pestañas o un cron simultáneo dupliquen la búsqueda.
+  const locked = await withJobLock("discovery", `operator:${auth.operator.email}`, 120, () =>
+    runProspecting(payload, requestId)
+  );
+  if (locked.status === "busy") {
+    return jsonError(409, "Ya hay una búsqueda en curso. Espere a que termine.", requestId);
   }
+  return locked.result;
+}
 
+async function runProspecting(payload: ProspectingPayload, requestId: string): Promise<NextResponse> {
   let businesses;
   try {
     businesses = await searchBusinesses(
@@ -37,10 +53,7 @@ export async function POST(request: Request) {
       payload.limit
     );
   } catch (err) {
-    return NextResponse.json(
-      { error: "Business discovery failed", details: `${err}` },
-      { status: 502 }
-    );
+    return jsonError(502, "No se pudo buscar negocios en este momento", requestId, err);
   }
 
   if (payload.lowRatingOnly) {
@@ -59,11 +72,7 @@ export async function POST(request: Request) {
       payload.location
     );
   } catch (err) {
-    console.error("[prospecting] import failed:", err);
-    return NextResponse.json(
-      { error: "Failed to import leads" },
-      { status: 500 }
-    );
+    return jsonError(500, "No se pudieron guardar los prospectos encontrados", requestId, err);
   }
 
   return NextResponse.json({

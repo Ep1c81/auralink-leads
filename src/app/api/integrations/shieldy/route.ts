@@ -1,65 +1,113 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
+import { z } from "zod";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { jsonError, newRequestId, parseJsonBody, RequestValidationError } from "@/lib/http";
+import { requireMachine } from "@/lib/machineAuth";
 
 export const runtime = "nodejs";
 
-const MAX_BYTES = 4096;
-const clean = (value: unknown, max: number) =>
-  typeof value === "string" ? value.trim().slice(0, max) : "";
+/**
+ * Ingesta de leads del formulario de Shieldy/BizMapShield.
+ *
+ * Contrato servidor-a-servidor: el BACKEND de Shieldy (nunca el navegador ni
+ * un sitio estático) envía `Authorization: Bearer <SHIELDY_INGEST_SECRET>`.
+ * Opcional: `submission_id` (UUID generado por Shieldy) para idempotencia;
+ * sin él, se deriva de los datos + fecha.
+ *
+ * Cada envío queda registrado en inbound_events (único por proveedor+id), así
+ * un reintento no duplica el lead. El consentimiento (casilla del
+ * formulario) se guarda como evidencia con fecha.
+ */
+
+const text = (max: number) => z.string().trim().max(max);
+const schema = z.object({
+  submission_id: z.string().uuid().optional(),
+  name: text(80).min(1),
+  business: text(100).min(1),
+  zone: text(80).min(1),
+  business_type: text(80).min(1),
+  plan: text(40).optional(),
+  phone: text(30)
+    .regex(/^\+?[\d\s()-]{7,30}$/)
+    .optional()
+    .or(z.literal("")),
+  consent: z.boolean().optional(),
+  website_url: z.string().max(100).optional(), // honeypot
+});
 
 export async function POST(request: Request) {
-  const expected = process.env.SHIELDY_INGEST_SECRET;
-  const provided = request.headers.get("authorization");
-  if (!expected || provided !== `Bearer ${expected}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const denied = requireMachine(request, ["SHIELDY_INGEST_SECRET"]);
+  if (denied) return denied;
+  const requestId = newRequestId();
 
-  if (Number(request.headers.get("content-length") || 0) > MAX_BYTES) {
-    return NextResponse.json({ error: "Payload too large" }, { status: 413 });
-  }
-  let input: Record<string, unknown>;
+  let input: z.infer<typeof schema>;
   try {
-    const raw = await request.text();
-    if (raw.length > MAX_BYTES) return NextResponse.json({ error: "Payload too large" }, { status: 413 });
-    input = JSON.parse(raw);
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid payload");
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    input = await parseJsonBody(request, schema, 4096);
+  } catch (err) {
+    if (err instanceof RequestValidationError) return jsonError(err.status, err.message, requestId);
+    throw err;
   }
 
-  // Honeypot: browsers should leave this field blank.
-  if (clean(input.website_url, 100)) return NextResponse.json({ ok: true });
+  // Honeypot: un humano deja este campo vacío.
+  if (input.website_url?.trim()) return NextResponse.json({ ok: true });
 
-  const name = clean(input.name, 80);
-  const company = clean(input.business, 100);
-  const zone = clean(input.zone, 80);
-  const type = clean(input.business_type, 80);
-  const plan = clean(input.plan, 40);
-  const phone = clean(input.phone, 30);
-  if (!name || !company || !zone || !type) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-  }
-  if (phone && !/^\+?[\d\s()-]{7,30}$/.test(phone)) {
-    return NextResponse.json({ error: "Invalid phone" }, { status: 400 });
-  }
-  if (resolveSupabaseEnv().problems.length) {
-    return NextResponse.json({ error: "CRM database unavailable" }, { status: 503 });
-  }
+  const receivedAt = new Date().toISOString();
+  const eventId =
+    input.submission_id ??
+    createHash("sha256")
+      .update(
+        [input.name, input.business, input.zone, input.business_type, input.phone ?? "", receivedAt.slice(0, 10)]
+          .join("|")
+          .toLowerCase()
+      )
+      .digest("hex");
+
   try {
-    const db = getSupabase();
-    const metadata = { source: "shieldy", product: "BizMapShield", zone, business_type: type, interested_plan: plan || "No estoy seguro", consent_to_contact: input.consent === true };
-    // The existing unique (name, company) index makes retries safe.
-    const { data, error } = await db.from("leads")
-      .upsert({ name, company, phone: phone || null, status: "new", metadata }, { onConflict: "name,company", ignoreDuplicates: true })
+    const db = getSupabaseAdmin();
+    const { data: event, error: eventError } = await db.rpc("record_inbound_event", {
+      p_provider: "shieldy",
+      p_event_id: eventId,
+      p_event_type: "lead_form",
+      p_payload: { ...input, website_url: undefined },
+    });
+    if (eventError) return jsonError(500, "No se pudo guardar el lead", requestId, eventError);
+    // Un reintento de un envío ya procesado no repite efectos; uno que quedó
+    // a medias (status distinto de done) se vuelve a procesar.
+    if ((event as { status?: string } | null)?.status === "done") {
+      return NextResponse.json({ ok: true, created: false, duplicate: true });
+    }
+
+    const consent = input.consent === true;
+    const metadata = {
+      source: "shieldy",
+      product: "BizMapShield",
+      zone: input.zone,
+      business_type: input.business_type,
+      interested_plan: input.plan || "No estoy seguro",
+      consent_to_contact: consent,
+      ...(consent
+        ? { consent_evidence: { channel: "formulario Shieldy", recorded_at: receivedAt, submission_id: eventId } }
+        : {}),
+    };
+    const { data, error } = await db
+      .from("leads")
+      .upsert(
+        { name: input.name, company: input.business, phone: input.phone || null, status: "new", metadata },
+        { onConflict: "name,company", ignoreDuplicates: true }
+      )
       .select("id")
       .maybeSingle();
-    if (error) {
-      console.error("[shieldy-lead] database insert failed:", error.code);
-      return NextResponse.json({ error: "Could not save lead" }, { status: 500 });
-    }
-    return NextResponse.json({ ok: true, created: Boolean(data) }, { status: 200 });
-  } catch (error) {
-    console.error("[shieldy-lead] unexpected error", error);
-    return NextResponse.json({ error: "Could not save lead" }, { status: 500 });
+    if (error) return jsonError(500, "No se pudo guardar el lead", requestId, error);
+
+    await db
+      .from("inbound_events")
+      .update({ status: "done", processed_at: new Date().toISOString() })
+      .eq("provider", "shieldy")
+      .eq("event_id", eventId);
+
+    return NextResponse.json({ ok: true, created: Boolean(data) });
+  } catch (err) {
+    return jsonError(500, "No se pudo guardar el lead", requestId, err);
   }
 }

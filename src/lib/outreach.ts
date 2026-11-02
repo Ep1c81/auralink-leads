@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
 import type { BantQualification, Lead, OutreachContent, WebEnrichment } from "@/lib/types";
 
 const DEFAULT_OFFERING =

@@ -1,4 +1,5 @@
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
+import { safeFetch, validateOutboundUrl } from "@/lib/safeFetch";
 import type { Lead } from "@/lib/types";
 
 /**
@@ -84,22 +85,21 @@ function extractFromHtml(html: string): PageContacts {
   return result;
 }
 
-/** Fetches one URL and returns its HTML, or null on any failure — never throws. */
+/**
+ * Descarga una URL con protección SSRF (safeFetch) y devuelve su HTML, o null
+ * ante cualquier falla — nunca lanza.
+ */
 async function fetchHtml(url: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
+    const result = await safeFetch(url, {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      maxBytes: MAX_HTML_CHARS,
       headers: { "User-Agent": USER_AGENT },
-      signal: controller.signal,
-      redirect: "follow",
     });
-    if (!response.ok) return null;
-    return (await response.text()).slice(0, MAX_HTML_CHARS);
+    if (result.status < 200 || result.status >= 300) return null;
+    return result.body;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -132,7 +132,7 @@ export async function deepEnrichLead(
     const normalized = /^https?:\/\//i.test(websiteUrl) ? websiteUrl : `https://${websiteUrl}`;
     let base: URL;
     try {
-      base = new URL(normalized);
+      base = validateOutboundUrl(normalized);
     } catch {
       return await markStatus(leadId, "failed");
     }

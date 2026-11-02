@@ -1,3 +1,4 @@
+import { requireOperatorPage } from "@/lib/auth";
 import { listCampaigns } from "@/lib/outreachCampaigns";
 import { CampaignCard } from "@/components/outreach/CampaignCard";
 import { CampaignTable } from "@/components/outreach/CampaignTable";
@@ -18,6 +19,7 @@ export default async function OutreachPage({
 }: {
   searchParams: Promise<{ draftLead?: string; draftLeadName?: string }>;
 }) {
+  await requireOperatorPage();
   const { draftLead, draftLeadName } = await searchParams;
   const campaigns = await listCampaigns();
 

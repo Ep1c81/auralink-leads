@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { requireOperatorApi } from "@/lib/auth";
+import { isUuid, jsonError } from "@/lib/http";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
 import { enrichAndSaveLead } from "@/lib/enrichment";
 import { withDeadline } from "@/lib/timeout";
@@ -55,10 +57,14 @@ async function runQualifyPipeline(lead: Lead, signal: AbortSignal): Promise<Pipe
  * within 5 seconds.
  */
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   const { id } = await params;
+  if (!isUuid(id)) return jsonError(400, "Identificador inválido", requestId);
 
   const { data: lead, error: fetchError } = await supabase
     .from("leads")
@@ -67,7 +73,7 @@ export async function POST(
     .single();
 
   if (fetchError || !lead) {
-    return NextResponse.json({ error: "Lead not found" }, { status: 404 });
+    return jsonError(404, "No se encontró el prospecto", requestId);
   }
 
   let result: PipelineResult;
@@ -84,10 +90,7 @@ export async function POST(
     try {
       result = await qualifyLeadProfileHeuristic(lead as Lead);
     } catch (fallbackErr) {
-      return NextResponse.json(
-        { error: "Lead qualification failed", details: `${fallbackErr}` },
-        { status: 502 }
-      );
+      return jsonError(502, "No se pudo calificar el prospecto", requestId, fallbackErr);
     }
   }
 

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { requireOperatorApi } from "@/lib/auth";
+import { isUuid, jsonError } from "@/lib/http";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
 import { qualifyLeadProfile } from "@/lib/qualification";
 import { enrichAndSaveLead } from "@/lib/enrichment";
 import { generateAndSaveOutreach } from "@/lib/outreach";
@@ -18,10 +20,14 @@ const DEFAULT_CONTEXT_PROMPT =
  * lead's website and generates outreach copy, all in a single request.
  */
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   const { id } = await params;
+  if (!isUuid(id)) return jsonError(400, "Identificador inválido", requestId);
 
   const { data: leadRow, error: fetchError } = await supabase
     .from("leads")
@@ -30,7 +36,7 @@ export async function POST(
     .single();
 
   if (fetchError || !leadRow) {
-    return NextResponse.json({ error: "Lead not found" }, { status: 404 });
+    return jsonError(404, "No se encontró el prospecto", requestId);
   }
 
   const lead = leadRow as Lead;
@@ -45,10 +51,7 @@ export async function POST(
   try {
     qualifyResult = await qualifyLeadProfile(lead, contextNote);
   } catch (err) {
-    return NextResponse.json(
-      { error: "Lead qualification failed", details: `${err}` },
-      { status: 502 }
-    );
+    return jsonError(502, "No se pudo calificar el prospecto", requestId, err);
   }
 
   let finalLead = qualifyResult.lead;
