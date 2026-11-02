@@ -1,6 +1,8 @@
-import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { requireOperatorApi } from "@/lib/auth";
+import { z } from "zod";
+import { jsonError, parseJsonBody, RequestValidationError } from "@/lib/http";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
 import { qualifyLeadProfile, qualifyLeadProfileHeuristic } from "@/lib/qualification";
 import { enrichAndSaveLead } from "@/lib/enrichment";
 import { deepEnrichLead } from "@/lib/deepEnrichment";
@@ -17,19 +19,20 @@ const DEFAULT_CITY = "Santa Ana, CR";
 const DEFAULT_CONTEXT_PROMPT =
   "Local business target for Google review acceleration, physical NFC tap standees, and automated WhatsApp patient/customer booking.";
 
-interface QualifyPayload {
-  lead_id?: string;
-  name?: string;
-  email?: string;
-  phone?: string;
-  company?: string;
-  message?: string;
-  // When true, applies the default high-value targeting context to the BANT
-  // prompt and, on a "qualified" result, also generates outreach copy —
-  // this is the single shared engine behind both the pipeline's "Qualify
-  // lead" and "Auto-Qualify & Enrich" actions.
-  auto_qualify?: boolean;
-}
+const optionalText = (max: number) => z.string().trim().max(max).optional().or(z.literal("").transform(() => undefined));
+const qualifySchema = z.object({
+  lead_id: z.string().uuid().optional(),
+  name: optionalText(120),
+  email: z.string().trim().toLowerCase().email().max(254).optional().or(z.literal("").transform(() => undefined)),
+  phone: optionalText(40),
+  company: optionalText(160),
+  message: optionalText(4000),
+  // true: aplica el contexto de prospección por defecto y, si califica,
+  // prepara también el mensaje (motor compartido de "Calificar" y
+  // "Auto-calificar y enriquecer").
+  auto_qualify: z.boolean().optional(),
+});
+type QualifyPayload = z.infer<typeof qualifySchema>;
 
 function buildAutoQualifyContextNote(lead: Lead): string {
   const category =
@@ -41,11 +44,15 @@ function buildAutoQualifyContextNote(lead: Lead): string {
 }
 
 export async function POST(request: Request) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   let payload: QualifyPayload;
   try {
-    payload = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    payload = await parseJsonBody(request, qualifySchema, 16_384);
+  } catch (err) {
+    if (err instanceof RequestValidationError) return jsonError(err.status, err.message, requestId);
+    throw err;
   }
 
   let lead: Lead;
@@ -58,18 +65,12 @@ export async function POST(request: Request) {
       .single();
 
     if (error || !data) {
-      return NextResponse.json({ error: "Lead not found" }, { status: 404 });
+      return jsonError(404, "No se encontró el prospecto", requestId);
     }
     lead = data as Lead;
   } else {
     if (!payload.name && !payload.phone && !payload.company && !payload.email) {
-      return NextResponse.json(
-        {
-          error:
-            "`lead_id`, or at least one of `name`, `phone`, `company`, `email` is required",
-        },
-        { status: 400 }
-      );
+      return jsonError(400, "Indique al menos nombre, teléfono, empresa o correo", requestId);
     }
 
     // Email is optional on the intake form (and never sent by the pipeline's
@@ -113,15 +114,12 @@ export async function POST(request: Request) {
           return NextResponse.json(
             {
               error: "duplicate_prospect",
-              message: "This prospect is already in your pipeline!",
+              message: "Este prospecto ya está en su pipeline.", request_id: requestId,
             },
             { status: 409 }
           );
         }
-        return NextResponse.json(
-          { error: "Failed to create lead" },
-          { status: 500 }
-        );
+        return jsonError(500, "No se pudo crear el prospecto", requestId);
       }
       lead = created as Lead;
     }
@@ -147,10 +145,7 @@ export async function POST(request: Request) {
     try {
       result = await qualifyLeadProfileHeuristic(lead);
     } catch (fallbackErr) {
-      return NextResponse.json(
-        { error: "Lead qualification failed", details: `${fallbackErr}` },
-        { status: 502 }
-      );
+      return jsonError(502, "No se pudo calificar el prospecto", requestId, fallbackErr);
     }
   }
 

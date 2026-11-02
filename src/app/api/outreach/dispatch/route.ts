@@ -1,27 +1,31 @@
-import { dispatchPitches, handleDispatchRequest } from "@/lib/outreachAutomation";
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Stage 1 of the automated WhatsApp sequence: posts the soft-CTA pitch for a
- * batch of Queued bizmap_leads to MAKE_DISPATCH_WEBHOOK_URL, then marks them
- * "Pitch Sent". Requires `Authorization: Bearer <OUTREACH_AUTOMATION_SECRET>`.
+ * RETIRADO. Este endpoint enviaba directamente a Make sin aprobación
+ * comercial, sin reserva atómica y marcaba "enviado" con un 200 de Make.
  *
- * Query params: limit (default 25, max 100), dry_run=1 (return the payload
- * without sending or updating anything), mobile_only=0 (also send to
- * landlines; by default only mobile numbers are sent), lead_ids=<uuid>,<uuid>
- * (only send to these bizmap_leads; ids that aren't Queued are ignored),
- * min_score=0-10 (lowest lead_score pitched; defaults to
- * OUTREACH_MIN_LEAD_SCORE, else 8; 0 sends regardless of score).
+ * Nuevo flujo:
+ *  - El operador prepara y aprueba lotes en /outreach (POST /api/outreach/batches
+ *    y /api/outreach/batches/{id}/approve).
+ *  - Un escenario programado llama a /api/cron/worker, que envía lo aprobado.
+ * Ver docs/MAKE_Y_META.md.
  */
-function handle(request: Request) {
-  return handleDispatchRequest(request, dispatchPitches, "/api/outreach/dispatch");
+function gone() {
+  return NextResponse.json(
+    {
+      error:
+        "Endpoint retirado. Los envíos ahora se aprueban en la pantalla Mensajes y envíos y los despacha /api/cron/worker.",
+    },
+    { status: 410 }
+  );
 }
 
-export async function GET(request: Request) {
-  return handle(request);
+export async function GET() {
+  return gone();
 }
 
-export async function POST(request: Request) {
-  return handle(request);
+export async function POST() {
+  return gone();
 }

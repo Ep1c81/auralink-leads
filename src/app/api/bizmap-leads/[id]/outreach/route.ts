@@ -1,66 +1,44 @@
 import { NextResponse } from "next/server";
-import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
-import { describeFetchCause } from "@/lib/apiErrors";
+import { requireOperatorApi } from "@/lib/auth";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { isUuid, jsonError } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Marks a bizmap_leads row as contacted. Called when a rep clicks the
- * dashboard's click-to-WhatsApp action, so "Outreached Leads" and the
- * "Follow-up Needed" filter reflect real activity instead of being
- * decorative.
+ * Registra que el operador abrió WhatsApp manualmente con este prospecto
+ * (envío hecho por una persona desde su teléfono, no automatizado). Solo
+ * marca outreached_at la primera vez.
  */
-export async function POST(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const env = resolveSupabaseEnv();
-  if (env.problems.length > 0) {
-    console.error("[/api/bizmap-leads/outreach] Supabase misconfigured:", env.problems);
-    return NextResponse.json(
-      { error: "Supabase is not configured", problems: env.problems },
-      { status: 500 }
-    );
-  }
-
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   const { id } = await params;
+  if (!isUuid(id)) return jsonError(400, "Identificador inválido", requestId);
 
   try {
-    const { data, error } = await getSupabase()
+    const db = getSupabaseAdmin();
+    const now = new Date().toISOString();
+    const { data, error } = await db
       .from("bizmap_leads")
-      .update({ outreached_at: new Date().toISOString() })
+      .update({ outreached_at: now, last_contacted_at: now })
       .eq("id", id)
-      .select()
-      .single();
+      .is("outreached_at", null)
+      .select("id, outreached_at")
+      .maybeSingle();
+    if (error) return jsonError(500, "No se pudo registrar el contacto", requestId, error);
+    if (data) return NextResponse.json({ lead: data });
 
-    if (error) {
-      console.error("[/api/bizmap-leads/outreach] Supabase update error:", {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint,
-      });
-      const status = error.code === "PGRST116" ? 404 : 500;
-      return NextResponse.json(
-        {
-          error: status === 404 ? "Lead not found" : "Failed to mark lead as outreached",
-          details: error.message,
-        },
-        { status }
-      );
-    }
-
-    return NextResponse.json({ lead: data });
-  } catch (error) {
-    const cause = describeFetchCause(error);
-    console.error("[/api/bizmap-leads/outreach] Network failure reaching Supabase:", {
-      supabaseUrl: env.url,
-      keySource: env.keyName,
-      ...cause,
-    });
-    return NextResponse.json(
-      { error: "Could not reach Supabase", details: cause },
-      { status: 500 }
-    );
+    const { data: existing, error: readError } = await db
+      .from("bizmap_leads")
+      .select("id, outreached_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (readError) return jsonError(500, "No se pudo registrar el contacto", requestId, readError);
+    if (!existing) return jsonError(404, "No se encontró el prospecto", requestId);
+    return NextResponse.json({ lead: existing });
+  } catch (err) {
+    return jsonError(503, "La base de datos no está disponible en este momento", requestId, err);
   }
 }

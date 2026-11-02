@@ -1,33 +1,30 @@
 import { NextResponse } from "next/server";
+import { requireOperatorApi } from "@/lib/auth";
 import { runAutoProspectSweep } from "@/lib/autoProspect";
+import { jsonError } from "@/lib/http";
+import { withJobLock } from "@/lib/jobLock";
 
-// This is a long-running background sweep (multi-niche discovery + one
-// Claude qualification call + one Claude outreach call per new lead, each
-// with its own retry/backoff) rather than a snappy user-facing request, so
-// give it plenty of headroom on platforms that support extending the
-// default function timeout (e.g. Vercel).
+// Barrido largo (búsqueda + calificación + borradores por prospecto nuevo).
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 /**
- * Dashboard-triggered entry point for the auto-prospect sweep (see
- * src/lib/autoProspect.ts for the actual discover -> import -> qualify ->
- * outreach logic) — this is what the "Run Background Auto-Pilot" toggle in
- * src/app/page.tsx calls. Deliberately unauthenticated, like the rest of
- * this app's dashboard-facing API surface, since it's only ever called
- * same-origin from the browser. For the secret-protected entry point meant
- * for an external scheduler (e.g. Vercel Cron), see
- * src/app/api/cron/sweep/route.ts instead.
+ * Barrido manual desde el pipeline (botón «Auto-Pilot»). Solo operadores y
+ * solo POST: un GET ya no dispara trabajo costoso. El acceso programado
+ * (Vercel Cron) usa /api/cron/sweep con CRON_SECRET.
  */
-async function handleSweepRequest() {
-  const result = await runAutoProspectSweep();
-  return NextResponse.json(result);
-}
+export async function POST(request: Request) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId, operator } = auth;
 
-export async function POST() {
-  return handleSweepRequest();
-}
-
-export async function GET() {
-  return handleSweepRequest();
+  try {
+    const locked = await withJobLock("auto-prospect", `operator:${operator.email}`, 330, runAutoProspectSweep);
+    if (locked.status === "busy") {
+      return jsonError(409, "Ya hay un barrido en curso. Espere a que termine.", requestId);
+    }
+    return NextResponse.json(locked.result);
+  } catch (err) {
+    return jsonError(502, "No se pudo completar el barrido", requestId, err);
+  }
 }

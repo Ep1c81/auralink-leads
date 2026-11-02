@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { requireOperatorApi } from "@/lib/auth";
+import { isUuid, jsonError } from "@/lib/http";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
 import { generateAndSaveOutreach } from "@/lib/outreach";
 import type { Lead } from "@/lib/types";
 
@@ -8,10 +10,14 @@ import type { Lead } from "@/lib/types";
  * a qualified lead, based on its business category and BANT qualification.
  */
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireOperatorApi(request);
+  if (auth instanceof NextResponse) return auth;
+  const { requestId } = auth;
   const { id } = await params;
+  if (!isUuid(id)) return jsonError(400, "Identificador inválido", requestId);
 
   const { data: lead, error: fetchError } = await supabase
     .from("leads")
@@ -20,14 +26,11 @@ export async function POST(
     .single();
 
   if (fetchError || !lead) {
-    return NextResponse.json({ error: "Lead not found" }, { status: 404 });
+    return jsonError(404, "No se encontró el prospecto", requestId);
   }
 
   if ((lead as Lead).status !== "qualified") {
-    return NextResponse.json(
-      { error: "Lead must be qualified before generating outreach" },
-      { status: 400 }
-    );
+    return jsonError(400, "El prospecto debe estar calificado antes de preparar el mensaje", requestId);
   }
 
   try {
@@ -35,9 +38,6 @@ export async function POST(
     return NextResponse.json(result);
   } catch (err) {
     console.error(`[outreach] request failed for lead ${id}:`, err);
-    return NextResponse.json(
-      { error: "Outreach generation failed", details: `${err}` },
-      { status: 502 }
-    );
+    return jsonError(502, "No se pudo preparar el mensaje", requestId);
   }
 }

@@ -1,5 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
+import { LEAD_COLUMNS } from "@/lib/leadColumns";
+
+const CAMPAIGN_COLUMNS = "id, name, status, created_at";
 import type {
   BantQualification,
   CampaignStatus,
@@ -136,7 +139,7 @@ export async function generateDraftMessage(
 ): Promise<OutreachMessage> {
   const { data: lead, error: leadError } = await supabase
     .from("leads")
-    .select("*")
+    .select(LEAD_COLUMNS)
     .eq("id", leadId)
     .single();
 
@@ -178,7 +181,7 @@ export async function generateDraftMessage(
 export async function listCampaigns(): Promise<OutreachCampaignWithCounts[]> {
   const { data: campaigns, error } = await supabase
     .from("outreach_campaigns")
-    .select("*")
+    .select(CAMPAIGN_COLUMNS)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -249,7 +252,7 @@ export async function createCampaign(name: string): Promise<OutreachCampaign> {
 export async function getCampaign(campaignId: string): Promise<OutreachCampaign | null> {
   const { data, error } = await supabase
     .from("outreach_campaigns")
-    .select("*")
+    .select(CAMPAIGN_COLUMNS)
     .eq("id", campaignId)
     .single();
 
@@ -309,11 +312,15 @@ export async function updateDraftMessage(
     .from("outreach_messages")
     .update(fields)
     .eq("id", messageId)
+    .eq("status", "draft")
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
-    throw new Error(`Failed to update message: ${error?.message}`);
+  if (error) {
+    throw new Error(`Failed to update message: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error("Only draft messages can be edited");
   }
 
   return data as OutreachMessage;
@@ -339,15 +346,24 @@ export async function queueMessage(messageId: string): Promise<OutreachMessage> 
     throw new Error("Only draft messages can be queued");
   }
 
+  // Transición atómica draft -> queued: si dos clics o dos pestañas llegan a
+  // la vez, solo una actualiza la fila (la otra no encuentra status = draft).
+  // La aprobación queda ligada a la versión exacta del texto que se revisó.
   const { data: updated, error: updateError } = await supabase
     .from("outreach_messages")
     .update({ status: "queued" satisfies OutreachMessageStatus })
     .eq("id", messageId)
+    .eq("status", "draft")
+    .eq("subject", existing.subject)
+    .eq("body", existing.body)
     .select()
-    .single();
+    .maybeSingle();
 
-  if (updateError || !updated) {
-    throw new Error(`Failed to queue message: ${updateError?.message}`);
+  if (updateError) {
+    throw new Error(`Failed to queue message: ${updateError.message}`);
+  }
+  if (!updated) {
+    throw new Error("Only draft messages can be queued");
   }
 
   const webhookUrl = process.env.N8N_OUTREACH_WEBHOOK;
@@ -383,6 +399,17 @@ export async function queueMessage(messageId: string): Promise<OutreachMessage> 
 /**
  * Applies an inbound status update from n8n after a send attempt.
  */
+/**
+ * Aplica el resultado informado por n8n. Los estados no retroceden: un
+ * callback tardío "sent" no pisa un "bounced"/"failed" ya registrado, y nada
+ * vuelve a draft/queued.
+ */
+const INBOUND_ALLOWED_FROM: Record<string, OutreachMessageStatus[]> = {
+  sent: ["queued"],
+  failed: ["queued", "sent"],
+  bounced: ["queued", "sent"],
+};
+
 export async function applyInboundStatus(
   messageId: string,
   status: OutreachMessageStatus,
@@ -392,16 +419,22 @@ export async function applyInboundStatus(
   if (providerMessageId) fields.provider_message_id = providerMessageId;
   if (status === "sent") fields.sent_at = new Date().toISOString();
 
+  const allowedFrom = INBOUND_ALLOWED_FROM[status] ?? [];
   const { data, error } = await supabase
     .from("outreach_messages")
     .update(fields)
     .eq("id", messageId)
+    .in("status", allowedFrom)
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
-    throw new Error(`Failed to update message status: ${error?.message}`);
+  if (error) {
+    throw new Error(`Failed to update message status: ${error.message}`);
   }
+  if (data) return data as OutreachMessage;
 
-  return data as OutreachMessage;
+  // Sin cambios: el mensaje no existe o ya está en un estado posterior.
+  const current = await getMessage(messageId);
+  if (!current) throw new Error("Message not found");
+  return current;
 }

@@ -1,3 +1,4 @@
+import { requireOperatorPage } from "@/lib/auth";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCampaign, listMessagesForCampaign } from "@/lib/outreachCampaigns";
@@ -19,6 +20,7 @@ export default async function CampaignDetailPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ openMessage?: string }>;
 }) {
+  await requireOperatorPage();
   const { id } = await params;
   const { openMessage } = await searchParams;
 

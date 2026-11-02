@@ -1,4 +1,5 @@
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin as supabase } from "@/lib/supabase/admin";
+import { safeFetch } from "@/lib/safeFetch";
 import type { Lead, WebEnrichment } from "@/lib/types";
 
 // Kept strict: this runs inline in the qualify request path, which has its
@@ -57,21 +58,13 @@ export async function enrichFromWebsite(url: string): Promise<WebEnrichment> {
 
   try {
     const normalizedUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const response = await safeFetch(normalizedUrl, {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      maxBytes: MAX_HTML_CHARS,
+      headers: { "User-Agent": USER_AGENT },
+    });
 
-    let response: Response;
-    try {
-      response = await fetch(normalizedUrl, {
-        headers: { "User-Agent": USER_AGENT },
-        signal: controller.signal,
-        redirect: "follow",
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       return {
         emails: [],
         socialLinks: {},
@@ -81,7 +74,7 @@ export async function enrichFromWebsite(url: string): Promise<WebEnrichment> {
       };
     }
 
-    const html = (await response.text()).slice(0, MAX_HTML_CHARS);
+    const html = response.body;
 
     return {
       emails: extractEmails(html),
