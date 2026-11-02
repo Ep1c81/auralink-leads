@@ -1,0 +1,3 @@
+import {spawn} from 'node:child_process';
+const server=spawn(process.execPath,['node_modules/next/dist/bin/next','start','--hostname','127.0.0.1','--port','3199'],{stdio:'ignore',env:{...process.env,APP_ORIGIN:'http://127.0.0.1:3199',SUPABASE_URL:'',NEXT_PUBLIC_SUPABASE_URL:'',NEXT_PUBLIC_SUPABASE_ANON_KEY:'',SUPABASE_SERVICE_ROLE_KEY:'',CRON_SECRET:'',SHIELDY_INGEST_SECRET:'',MAKE_RECEIPT_SECRET:'',META_APP_SECRET:''}});
+try{let ready=false;for(let i=0;i<100;i++){try{await fetch('http://127.0.0.1:3199/login');ready=true;break;}catch{await new Promise(r=>setTimeout(r,100));}}if(!ready)throw new Error('No inició el servidor de prueba');process.env.TEST_BASE_URL='http://127.0.0.1:3199';await import('./http-smoke.mjs');}finally{server.kill('SIGTERM');}
