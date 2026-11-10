@@ -1,3 +1,4 @@
+import { reservePlacesCall } from "@/lib/apiBudget";
 import { supabase } from "@/lib/supabase";
 import type { Lead } from "@/lib/types";
 
@@ -274,6 +275,10 @@ export async function runHotListSweep(): Promise<HotListSweepResult> {
   const found = new Map<string, { place: HotPlace; niche: string; zone: string }>();
   for (const niche of HOT_LIST_NICHES) {
     for (const { name: zone, query } of zones) {
+      if (!(await reservePlacesCall())) {
+        result.errors.push(`Google Places monthly free budget reached; skipped ${niche} / ${zone}`);
+        continue;
+      }
       try {
         const places = await searchPlaces(niche, query, apiKey);
         result.searched += places.length;
