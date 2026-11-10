@@ -12,7 +12,35 @@ import type { Lead } from "@/lib/types";
  */
 
 export const HOT_LIST_NICHES = ["licorera", "barbería", "clínica dental"] as const;
-export const HOT_LIST_ZONES = ["Santa Ana", "Escazú"] as const;
+/**
+ * Each zone has a display name and the place text Google gets, so small
+ * barrios are disambiguated by their canton.
+ */
+export const HOT_LIST_ZONES = [
+  { name: "Santa Ana", query: "Santa Ana, San José" },
+  { name: "Escazú", query: "Escazú, San José" },
+  { name: "Ciudad Colón", query: "Ciudad Colón, Mora, San José" },
+  { name: "Pavas", query: "Pavas, San José" },
+  { name: "La Sabana", query: "La Sabana, Mata Redonda, San José" },
+  { name: "Rohrmoser", query: "Rohrmoser, Pavas, San José" },
+  { name: "La Uruca", query: "La Uruca, San José" },
+  { name: "Puriscal", query: "Santiago de Puriscal, San José" },
+] as const;
+export type HotListZone = (typeof HOT_LIST_ZONES)[number];
+
+/**
+ * Zones searched per daily run. They rotate, so every zone is covered every
+ * HOT_LIST_ZONES.length / ZONES_PER_RUN days while Google Places usage stays
+ * at niches × ZONES_PER_RUN calls a day.
+ */
+export const ZONES_PER_RUN = 4;
+
+export function zonesForRun(date: Date): HotListZone[] {
+  const groups = Math.ceil(HOT_LIST_ZONES.length / ZONES_PER_RUN);
+  const dayIndex = Math.floor(date.getTime() / 86_400_000);
+  const start = (dayIndex % groups) * ZONES_PER_RUN;
+  return HOT_LIST_ZONES.slice(start, start + ZONES_PER_RUN);
+}
 export const HOT_LIST_DAILY_SIZE = 10;
 
 export const PIPELINE_STAGES = [
@@ -139,7 +167,7 @@ interface PlacesApiPlace {
   businessStatus?: string;
 }
 
-async function searchPlaces(niche: string, zone: string, apiKey: string): Promise<HotPlace[]> {
+async function searchPlaces(niche: string, zoneQuery: string, apiKey: string): Promise<HotPlace[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -151,7 +179,7 @@ async function searchPlaces(niche: string, zone: string, apiKey: string): Promis
         "X-Goog-FieldMask": PLACES_FIELD_MASK,
       },
       body: JSON.stringify({
-        textQuery: `${niche} en ${zone}, Costa Rica`,
+        textQuery: `${niche} en ${zoneQuery}, Costa Rica`,
         languageCode: "es",
         regionCode: "CR",
         maxResultCount: 20,
@@ -201,6 +229,7 @@ export function getPipeline(lead: Lead): PipelineState | null {
 
 export interface HotListSweepResult {
   ranAt: string;
+  zones: string[];
   searched: number;
   candidates: number;
   inserted: number;
@@ -209,7 +238,7 @@ export interface HotListSweepResult {
 }
 
 /**
- * Searches every niche × zone, scores candidates and stores them. New places
+ * Searches every niche × today's zones, scores candidates and stores them. New places
  * become "por_visitar" leads; places already in the CRM only get their
  * rating/review numbers refreshed (their pipeline stage is never reset).
  */
@@ -217,6 +246,7 @@ export async function runHotListSweep(): Promise<HotListSweepResult> {
   const ranAt = new Date().toISOString();
   const result: HotListSweepResult = {
     ranAt,
+    zones: [],
     searched: 0,
     candidates: 0,
     inserted: 0,
@@ -230,11 +260,14 @@ export async function runHotListSweep(): Promise<HotListSweepResult> {
     return result;
   }
 
+  const zones = zonesForRun(new Date(ranAt));
+  result.zones = zones.map((z) => z.name);
+
   const found = new Map<string, { place: HotPlace; niche: string; zone: string }>();
   for (const niche of HOT_LIST_NICHES) {
-    for (const zone of HOT_LIST_ZONES) {
+    for (const { name: zone, query } of zones) {
       try {
-        const places = await searchPlaces(niche, zone, apiKey);
+        const places = await searchPlaces(niche, query, apiKey);
         result.searched += places.length;
         for (const place of places) {
           if (isHotCandidate(place) && !found.has(place.placeId)) {
@@ -341,6 +374,8 @@ export interface TrialReminder {
 }
 
 export interface HotListView {
+  zone: string | null;
+  zoneCounts: Record<string, number>;
   today: HotLead[];
   reminders: TrialReminder[];
   counts: Record<PipelineStage, number>;
@@ -374,7 +409,7 @@ function toHotLead(lead: Lead, now: number): HotLead | null {
   };
 }
 
-export async function getHotListView(): Promise<HotListView> {
+export async function getHotListView(zone: string | null = null): Promise<HotListView> {
   const { data, error } = await supabase
     .from("leads")
     .select("*")
@@ -393,8 +428,12 @@ export async function getHotListView(): Promise<HotListView> {
   >;
   for (const l of leads) counts[l.stage]++;
 
-  const today = leads
-    .filter((l) => l.stage === "por_visitar")
+  const pending = leads.filter((l) => l.stage === "por_visitar");
+  const zoneCounts: Record<string, number> = {};
+  for (const l of pending) if (l.zone) zoneCounts[l.zone] = (zoneCounts[l.zone] ?? 0) + 1;
+
+  const today = pending
+    .filter((l) => !zone || l.zone === zone)
     .sort((a, b) => b.heatScore - a.heatScore)
     .slice(0, HOT_LIST_DAILY_SIZE);
 
@@ -405,7 +444,7 @@ export async function getHotListView(): Promise<HotListView> {
     else if (l.trialDay >= 4) reminders.push({ lead: l, action: "enviar_reporte" });
   }
 
-  return { today, reminders, counts };
+  return { zone, zoneCounts, today, reminders, counts };
 }
 
 export async function updateLeadStage(id: string, stage: PipelineStage): Promise<PipelineState> {

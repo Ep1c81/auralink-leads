@@ -7,8 +7,8 @@ import type { HotLead } from "@/lib/hotList";
 export function whatsappIntro(lead: HotLead): string {
   return [
     `Hola, ¿hablo con el encargado de ${lead.name}?`,
-    "Soy Alex de Aura Link Digital, aquí en Santa Ana.",
-    "Ayudamos a negocios de la zona a conseguir más reseñas reales en Google con una tarjeta NFC en el mostrador: el cliente la toca y deja su opinión en segundos.",
+    "Soy Alex de Aura Link Digital.",
+    `Ayudamos a negocios${lead.zone ? ` de ${lead.zone}` : " de la zona"} a conseguir más reseñas reales en Google con una tarjeta NFC en el mostrador: el cliente la toca y deja su opinión en segundos.`,
     "Instalamos una prueba gratis de 14 días, sin compromiso. ¿Le puedo pasar a enseñarla 5 minutos esta semana?",
   ].join(" ");
 }
@@ -23,7 +23,7 @@ export function callScript(lead: HotLead): string[] {
     `Gancho: "${reviews} La mayoría de clientes contentos nunca escriben, no porque no quieran, sino porque nadie se lo pide en el momento."`,
     `Solución: "Ponemos una tarjeta NFC en el mostrador. El personal le pregunta a cada cliente cómo le fue y lo invita a dejar su opinión. Lo toca con el celular y abre su perfil de Google directo."`,
     `Prueba: "Se la instalo gratis 14 días. Al día 4 le mando un reporte con lo que llevamos. Si no ve resultados, me la llevo y no paga nada."`,
-    `Prueba social: "Con La Liko Store en Santa Ana empezamos el 6 de noviembre y en 4 días ya tenían 14 reseñas nuevas."`,
+    `Prueba social: "Con La Liko Store, en Santa Ana, empezamos el 6 de noviembre y en 4 días ya tenían 14 reseñas nuevas."`,
     `Cierre: "¿Se la dejo instalada hoy mismo o prefiere que pase mañana?"`,
     `Regla: invitar a todos los clientes por igual, solo reseñas reales, nunca pedir 5 estrellas ni dar nada a cambio.`,
   ];
