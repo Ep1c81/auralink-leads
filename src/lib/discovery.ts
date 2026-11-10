@@ -1,5 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import type { Lead } from "@/lib/types";
+import { reservePlacesCall } from "@/lib/apiBudget";
 
 export interface DiscoveredBusiness {
   placeId: string;
@@ -120,6 +121,10 @@ async function searchBusinessesGooglePlaces(
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     throw new Error("GOOGLE_PLACES_API_KEY is not configured");
+  }
+
+  if (!(await reservePlacesCall())) {
+    throw new Error("Google Places monthly free budget reached; search skipped");
   }
 
   const textQuery = `${industry} in ${location}`;
