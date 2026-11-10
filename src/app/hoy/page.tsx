@@ -1,4 +1,4 @@
-import { getHotListView, HOT_LIST_ZONES, PIPELINE_STAGES } from "@/lib/hotList";
+import { getHotListView, HOT_LIST_ZONES, PIPELINE_STAGES, ROTATION_DAYS } from "@/lib/hotList";
 import { HotLeadCard } from "@/components/hoy/HotLeadCard";
 import { STAGE_LABELS, routeUrl } from "@/components/hoy/script";
 import {
@@ -119,7 +119,8 @@ export default async function HoyPage({
               No hay prospectos pendientes{zone ? ` en ${zone}` : ""}.
             </p>
             <p className={`${body} mt-1`}>
-              La búsqueda corre cada mañana a las 5:00 y recorre todas las zonas cada 2 días. Si
+              La búsqueda corre cada mañana a las 5:00 y recorre todas las zonas cada{" "}
+              {ROTATION_DAYS} días. Si
               sigue vacío, revisá que GOOGLE_PLACES_API_KEY esté configurada en Vercel.
             </p>
           </div>

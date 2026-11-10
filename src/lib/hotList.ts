@@ -25,7 +25,12 @@ export const HOT_LIST_ZONES = [
   { name: "Rohrmoser", query: "Rohrmoser, Pavas, San José" },
   { name: "La Uruca", query: "La Uruca, San José" },
   { name: "Puriscal", query: "Santiago de Puriscal, San José" },
+  { name: "San José Centro", query: "San José centro, San José" },
+  { name: "Curridabat", query: "Curridabat, San José" },
+  { name: "Heredia", query: "Heredia centro, Heredia" },
+  { name: "Alajuela", query: "Alajuela centro, Alajuela" },
 ] as const;
+
 export type HotListZone = (typeof HOT_LIST_ZONES)[number];
 
 /**
@@ -34,6 +39,9 @@ export type HotListZone = (typeof HOT_LIST_ZONES)[number];
  * at niches × ZONES_PER_RUN calls a day.
  */
 export const ZONES_PER_RUN = 4;
+
+/** Days it takes the rotation to cover every zone once. */
+export const ROTATION_DAYS = Math.ceil(HOT_LIST_ZONES.length / ZONES_PER_RUN);
 
 export function zonesForRun(date: Date): HotListZone[] {
   const groups = Math.ceil(HOT_LIST_ZONES.length / ZONES_PER_RUN);
