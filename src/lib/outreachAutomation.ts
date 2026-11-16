@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { assertNotSender, MakeDispatchError, sendMakePayload, validateMakeWebhook } from "@/lib/makeDispatch";
 import { getSupabase } from "@/lib/supabase";
 import { isCrProvince, provinceFromAddress, type CrProvince } from "@/lib/costaRica";
 import { buildOutreachMessage, cantonFromAddress, type OutreachStage } from "@/lib/whatsapp";
@@ -120,7 +121,7 @@ export interface DispatchResult {
  * response to send back, or null when the request is authorized.
  */
 export function checkAutomationAuth(request: Request): NextResponse | null {
-  const secret = process.env.OUTREACH_AUTOMATION_SECRET;
+  const secret = process.env.OUTREACH_AUTOMATION_SECRET?.trim();
   if (!secret) {
     console.error("[outreachAutomation] OUTREACH_AUTOMATION_SECRET not configured; rejecting request");
     return NextResponse.json({ error: "Endpoint not configured" }, { status: 503 });
@@ -202,19 +203,13 @@ function toDispatchItem(lead: BizmapLeadRow, stage: SequenceStage): DispatchItem
 }
 
 async function postToMake(stage: SequenceStage, leads: DispatchItem[]): Promise<void> {
-  const webhookUrl = process.env.MAKE_DISPATCH_WEBHOOK_URL?.trim();
-  if (!webhookUrl) {
-    throw new DispatchConfigError("MAKE_DISPATCH_WEBHOOK_URL is not configured");
+  let webhookUrl: string;
+  try {
+    webhookUrl = validateMakeWebhook(process.env.MAKE_DISPATCH_WEBHOOK_URL);
+  } catch (error) {
+    throw new DispatchConfigError(error instanceof Error ? error.message : "Webhook de Make inválido");
   }
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sequence_stage: stage, count: leads.length, leads }),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Make webhook responded ${response.status}: ${text.slice(0, 200)}`);
-  }
+  await sendMakePayload(webhookUrl, { sequence_stage: stage, count: leads.length, leads });
 }
 
 export class DispatchConfigError extends Error {}
@@ -231,6 +226,11 @@ const SEQUENCE_STAGES: readonly SequenceStage[] = ["pitch_1", "followup_2"];
 export function validateDispatchItem(item: DispatchItem): string[] {
   const errors: string[] = [];
   if (!item.lead_id) errors.push("lead_id is empty");
+  try {
+    assertNotSender(item.phone, process.env.WHATSAPP_SENDER_PHONE);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "Destinatario inválido");
+  }
   if (!/^\+506[0-9]{8}$/.test(item.phone)) errors.push(`phone "${item.phone}" is not +506 followed by 8 digits`);
   if (typeof item.business_name !== "string") errors.push("business_name is not a string");
   if (!Number.isInteger(item.lead_score) || item.lead_score < 0 || item.lead_score > 10) {
@@ -455,6 +455,6 @@ export async function handleDispatchRequest(
     console.error(`[${logTag}] dispatch failed:`, err);
     const message = err instanceof Error ? err.message : String(err);
     const status = err instanceof DispatchConfigError ? 503 : 502;
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message, ...(err instanceof MakeDispatchError ? { outcome: err.outcome } : {}) }, { status });
   }
 }
