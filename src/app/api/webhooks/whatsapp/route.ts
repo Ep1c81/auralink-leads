@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { qualifyAndRecord } from "@/lib/qualification";
@@ -20,6 +21,7 @@ interface WhatsAppWebhookPayload {
       value: {
         contacts?: Array<{ profile?: { name?: string }; wa_id?: string }>;
         messages?: WhatsAppMessage[];
+        statuses?: Array<{ id: string; status: string; timestamp?: string; recipient_id?: string }>;
       };
     }>;
   }>;
@@ -41,17 +43,41 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: Request) {
+  const appSecret = process.env.WHATSAPP_APP_SECRET;
+  const signature = request.headers.get("x-hub-signature-256");
+  if (!appSecret || !signature?.startsWith("sha256=")) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const rawBody = await request.text();
+  const expected = createHmac("sha256", appSecret).update(rawBody).digest("hex");
+  const supplied = signature.slice(7);
+  const a = Buffer.from(expected, "hex");
+  const b = /^[0-9a-f]{64}$/i.test(supplied) ? Buffer.from(supplied, "hex") : Buffer.alloc(0);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 403 });
+  }
   let payload: WhatsAppWebhookPayload;
   try {
-    payload = await request.json();
+    payload = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
   const value = payload.entry?.[0]?.changes?.[0]?.value;
+  // Update only records linked to a real Meta provider message ID.
+  for (const receipt of value?.statuses ?? []) {
+    if (!["sent", "delivered", "read", "failed"].includes(receipt.status)) continue;
+    const { error: receiptError } = await supabase.from("outreach_messages")
+      .update({ status: receipt.status })
+      .eq("provider_message_id", receipt.id);
+    if (receiptError) {
+      console.error("[whatsapp-webhook] receipt update failed", receiptError.code);
+      return NextResponse.json({ error: "Receipt persistence failed" }, { status: 500 });
+    }
+  }
   const message = value?.messages?.[0];
 
-  // Non-text events (delivery/read receipts, media, etc.) - ack and skip.
+  // Receipts are handled above. Other non-text events are acknowledged.
   if (!message || message.type !== "text" || !message.text?.body) {
     return NextResponse.json({ status: "ignored" });
   }
