@@ -36,7 +36,7 @@ export async function POST(request: Request) {
   const type = clean(input.business_type, 80);
   const plan = clean(input.plan, 40);
   const phone = clean(input.phone, 30);
-  if (!name || !company || !zone || !type) {
+  if (input.consent !== true || !name || !company || !zone || !type) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
   if (phone && !/^\+?[\d\s()-]{7,30}$/.test(phone)) {
@@ -57,7 +57,39 @@ export async function POST(request: Request) {
       console.error("[shieldy-lead] database insert failed:", error.code);
       return NextResponse.json({ error: "Could not save lead" }, { status: 500 });
     }
-    return NextResponse.json({ ok: true, created: Boolean(data) }, { status: 200 });
+    // A duplicate submission may not return a row from the upsert. Resolve its
+    // existing UUID so both pipelines share a stable identity across retries.
+    let leadId: string | undefined = data?.id;
+    if (!leadId) {
+      const { data: existing, error: lookupError } = await db.from("leads")
+        .select("id").eq("name", name).eq("company", company).maybeSingle();
+      if (lookupError || !existing?.id) {
+        console.error("[shieldy-lead] unable to resolve existing lead", lookupError?.code);
+        return NextResponse.json({ error: "Could not sync lead" }, { status: 500 });
+      }
+      leadId = existing.id;
+    }
+
+    // The commercial CRM reads bizmap_leads, not leads. Mirror with the same
+    // UUID; never overwrite a salesperson's existing status or notes.
+    // Leave outreach_status null so a new Shieldy inquiry cannot enter
+    // automated outbound campaigns before manual review.
+    const { error: pipelineError } = await db.from("bizmap_leads").upsert({
+      id: leadId,
+      business_name: company,
+      business_type: type,
+      address: zone,
+      phone_number: phone || null,
+      source: "shieldy",
+      status: "New",
+      outreach_status: null,
+      ai_notes: `SHIELDY - REVISIÓN MANUAL. Contacto: ${name}. Plan: ${plan || "Sin definir"}. Consentimiento registrado.`,
+    }, { onConflict: "id", ignoreDuplicates: true });
+    if (pipelineError) {
+      console.error("[shieldy-lead] pipeline sync failed:", pipelineError.code);
+      return NextResponse.json({ error: "Could not sync lead" }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, created: Boolean(data), crm_synced: true }, { status: 200 });
   } catch (error) {
     console.error("[shieldy-lead] unexpected error", error);
     return NextResponse.json({ error: "Could not save lead" }, { status: 500 });
