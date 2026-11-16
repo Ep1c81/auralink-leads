@@ -1,33 +1,40 @@
 import { NextResponse } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 import { runAutoProspectSweep } from "@/lib/autoProspect";
 
-// This is a long-running background sweep (multi-niche discovery + one
-// Claude qualification call + one Claude outreach call per new lead, each
-// with its own retry/backoff) rather than a snappy user-facing request, so
-// give it plenty of headroom on platforms that support extending the
-// default function timeout (e.g. Vercel).
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
-/**
- * Dashboard-triggered entry point for the auto-prospect sweep (see
- * src/lib/autoProspect.ts for the actual discover -> import -> qualify ->
- * outreach logic) — this is what the "Run Background Auto-Pilot" toggle in
- * src/app/page.tsx calls. Deliberately unauthenticated, like the rest of
- * this app's dashboard-facing API surface, since it's only ever called
- * same-origin from the browser. For the secret-protected entry point meant
- * for an external scheduler (e.g. Vercel Cron), see
- * src/app/api/cron/sweep/route.ts instead.
- */
-async function handleSweepRequest() {
-  const result = await runAutoProspectSweep();
-  return NextResponse.json(result);
+// Discovery is a billable operation: never trust Origin or a browser toggle
+// as authorization. Use a server-side bearer token, never expose it as NEXT_PUBLIC.
+function authorized(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  if (!secret || !provided) return false;
+  const expected = Buffer.from(secret);
+  const received = Buffer.from(provided);
+  return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
-export async function POST() {
-  return handleSweepRequest();
+async function handle(request: Request) {
+  if (!authorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const startedAt = Date.now();
+  const runId = crypto.randomUUID();
+  console.info("[prospecting-run] started", JSON.stringify({ runId, source: "manual-api" }));
+  try {
+    const result = await runAutoProspectSweep();
+    const summary = result.results.map(({ niche, found, imported, qualified, outreachGenerated, errors }) => ({
+      niche, found, imported, qualified, outreachGenerated, errorCount: errors.length,
+    }));
+    console.info("[prospecting-run] completed", JSON.stringify({ runId, durationMs: Date.now() - startedAt, summary }));
+    return NextResponse.json({ ...result, runId });
+  } catch (error) {
+    console.error("[prospecting-run] failed", JSON.stringify({ runId, durationMs: Date.now() - startedAt, error: error instanceof Error ? error.message : "Unknown error" }));
+    return NextResponse.json({ error: "Prospecting failed", runId }, { status: 500 });
+  }
 }
 
-export async function GET() {
-  return handleSweepRequest();
-}
+export async function POST(request: Request) { return handle(request); }
+export async function GET() { return NextResponse.json({ error: "Method not allowed" }, { status: 405 }); }
