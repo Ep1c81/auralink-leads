@@ -41,8 +41,25 @@ async function handleCronRequest(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const result = await runAutoProspectSweep();
-  return NextResponse.json(result);
+  const runId = crypto.randomUUID();
+  const startedAt = Date.now();
+  console.info("[prospecting-run] started", JSON.stringify({ runId, source: "vercel-cron" }));
+  try {
+    const result = await runAutoProspectSweep();
+    const summary = result.results.map(({ niche, found, imported, qualified, outreachGenerated, errors }) => ({
+      niche, found, imported, qualified, outreachGenerated, errorCount: errors.length,
+    }));
+    console.info("[prospecting-run] completed", JSON.stringify({
+      runId, durationMs: Date.now() - startedAt, summary,
+    }));
+    return NextResponse.json({ ...result, runId });
+  } catch (error) {
+    console.error("[prospecting-run] failed", JSON.stringify({
+      runId, durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : "Unknown error",
+    }));
+    return NextResponse.json({ error: "Prospecting failed", runId }, { status: 500 });
+  }
 }
 
 export async function GET(request: Request) {

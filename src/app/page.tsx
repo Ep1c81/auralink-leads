@@ -275,8 +275,9 @@ function AutoPilotToggle({
         type="button"
         role="switch"
         aria-checked={enabled}
-        onClick={onToggle}
-        className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+        disabled
+        title="La prospección se ejecuta desde el servidor con una programación segura. El control manual está deshabilitado."
+        className={`flex cursor-not-allowed items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
           enabled
             ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
             : "border-zinc-200 text-zinc-500 hover:border-zinc-400 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-600"
@@ -293,7 +294,7 @@ function AutoPilotToggle({
             }`}
           />
         </span>
-        Run Background Auto-Pilot
+        Prospección programada (control manual deshabilitado)
         {running && <span className="font-normal opacity-70">(sweeping...)</span>}
       </button>
       {lastRun && !error && (
