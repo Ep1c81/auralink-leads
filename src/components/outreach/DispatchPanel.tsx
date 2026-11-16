@@ -106,8 +106,8 @@ export function DispatchPanel() {
             Dispatch pitches
           </h2>
           <p className={`mt-1 ${body}`}>
-            Sends the first WhatsApp message to Queued mobile leads through Make and marks them
-            Pitch Sent.
+            Envía el lote a Make. «Pitch Sent» solo indica aceptación por Make;
+            la entrega al destinatario debe confirmarse en WhatsApp.
           </p>
         </div>
         <button
@@ -165,7 +165,7 @@ export function DispatchPanel() {
 
       {phase === "sent" && result && (
         <p role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-          Sent {result.dispatched} pitch{result.dispatched === 1 ? "" : "es"} to Make
+          Make aceptó {result.dispatched} solicitud{result.dispatched === 1 ? "" : "es"}. Entrega por WhatsApp sin confirmar
           {result.skipped_duplicates > 0 && ` · ${result.skipped_duplicates} duplicate number(s) skipped`}
           {result.campaign_messages_marked === null
             ? " · campaign messages could not be updated"
@@ -176,7 +176,7 @@ export function DispatchPanel() {
       )}
 
       {(phase === "previewed" || phase === "sent") && (
-        <LeadList leads={leads} heading={phase === "sent" ? "Sent" : "Will be sent"} />
+        <LeadList leads={leads} heading={phase === "sent" ? "Aceptados por Make" : "Vista previa"} />
       )}
 
       <div className="flex flex-wrap justify-end gap-2">
