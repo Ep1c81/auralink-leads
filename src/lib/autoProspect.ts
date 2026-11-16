@@ -22,13 +22,13 @@ const AUTO_PROSPECT_SEARCH_LIMIT = 10;
 const AUTO_PROSPECT_STAGGER_MS = 1500;
 
 const REPUTATION_SHIELD_OFFERING_EN =
-  'a "Reputation Shield" package: physical NFC tap standees placed at the checkout counter that let a happy customer open a pre-filled 5-star Google review in one tap, paired with WhatsApp-based customer engagement — aimed at local businesses with a low Google rating or few reviews who need to build up their online reputation quickly';
+  'a "Reputation Shield" package: physical NFC tap standees placed at the checkout counter that invite any customer to leave an honest Google review without incentives or rating filters, paired with opt-in customer engagement — aimed at local businesses looking to improve their customer experience and reputation';
 
 // A verb-phrase, not a noun phrase: buildFallbackOutreach() in
 // src/lib/outreach.ts splices this into "ayuda a negocios como X a ___", so
 // it must read as a continuation of "to ___", not "to our ___".
 const REPUTATION_SHIELD_OFFERING_ES =
-  "blindar su reputación en Google con standees NFC que dejan una reseña de 5 estrellas en un solo toque, junto con atención al cliente por WhatsApp";
+  "facilitar reseñas auténticas y voluntarias en Google con tarjetas NFC, junto con atención por WhatsApp para clientes que acepten recibir mensajes";
 
 function buildReputationShieldContextNote(lead: Lead): string {
   const category =
