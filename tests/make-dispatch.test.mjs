@@ -43,6 +43,18 @@ test("Make acceptance preserves payload and does not claim delivery", async () =
   assert.equal(calls, 1);
 });
 
+test("optional headers are sent and cannot override the JSON content type", async () => {
+  let calls = 0;
+  const api = transport(async (_url, options) => {
+    calls++;
+    assert.equal(options.headers["x-make-apikey"], "k");
+    assert.equal(options.headers["Content-Type"], "application/json");
+    return new Response("Accepted");
+  });
+  await api.sendMakePayload("https://hook.us2.make.com/test", {}, { "x-make-apikey": "k", "Content-Type": "text/plain" });
+  assert.equal(calls, 1);
+});
+
 test("rejections keep status but never disclose body or webhook credentials", async () => {
   for (const status of [400, 404, 410, 429, 500]) {
     const api = transport(async () => new Response("secret-token", { status }));

@@ -33,12 +33,12 @@ export function assertNotSender(recipient: string, sender?: string): void {
 
 /** A successful result ONLY means accepted by Make, never delivered by Meta.
  * No automatic retries: a timed-out request may already be in Make's queue. */
-export async function sendMakePayload(url: string, payload: unknown): Promise<void> {
+export async function sendMakePayload(url: string, payload: unknown, headers: Record<string, string> = {}): Promise<void> {
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(20_000),
       redirect: "error",

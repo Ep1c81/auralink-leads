@@ -55,6 +55,78 @@ El payload de prueba tiene UUID sintético, score 10 y estado Queued para pasar
 los filtros de score normales. No corresponde a una fila de CRM; no conectar
 callbacks de escritura de CRM a esa prueba.
 
+## Envío en vivo con reservas (desactivado por defecto)
+
+La migración `supabase/migrations/20261127120000_acquisition.sql` (copia de
+`supabase/review/acquisition.sql` más `acq_mark_failed`) **no está aplicada**.
+Sin ella y sin `ACQUISITION_LIVE_ENABLED=true`, toda ruta en vivo responde 503.
+
+Rutas:
+
+- `POST /api/outreach/dispatch` (`pitch_1`) y `/api/outreach/followup-check`
+  (`followup_2`), con `Authorization: Bearer OUTREACH_AUTOMATION_SECRET`.
+  `?dry_run=1` sigue siendo solo vista previa (`acq_preview`, sin reservas ni red).
+- `GET /api/cron/acquisition`: cron diario de Vercel a las 15:15 UTC
+  (09:15 Costa Rica), `Authorization: Bearer CRON_SECRET`. Ejecuta `pitch_1`
+  y luego `followup_2`; si una etapa falla, no ejecuta la siguiente. Los cron
+  solo corren en el despliegue de producción.
+
+Flujo por etapa: se valida la configuración → `acq_reserve(stage)` (máximo 5
+por día y etapa, hora de Costa Rica, una vez por teléfono y etapa) → se lee
+`lead_id`, `business_name` y `suppressed` de `acq_contacts` → un único POST a
+Make, sin reintentos. Lista vacía: `{dispatched: 0}` sin llamar a Make.
+
+Payload enviado al webhook (el Iterator sigue usando `1.leads[]`):
+
+```json
+{
+  "sequence_stage": "pitch_1",
+  "count": 1,
+  "leads": [{
+    "reservation_id": "uuid de acq_reservations",
+    "preview_lead_id": "uuid de bizmap_leads",
+    "phone": "506XXXXXXXX",
+    "business_name": "Nombre",
+    "consent_verified": true,
+    "suppressed": false,
+    "sequence_stage": "pitch_1"
+  }]
+}
+```
+
+Make debe devolver `reservation_id` en los callbacks para enlazar el
+`provider_id` (Message ID) con la reserva.
+
+Resultados de Make:
+
+- 2xx: aceptado por Make, **no** entregado. La entrega solo se registra con el
+  callback `delivered`/`read`.
+- HTTP no-2xx (rechazo): las reservas pasan a `failed` mediante
+  `acq_mark_failed`. Siguen ocupando el cupo del día y bloquean ese teléfono
+  para esa etapa; no se reenvían automáticamente.
+- Timeout/red (resultado desconocido): las reservas quedan `reserved`, porque
+  Make puede tenerlas en cola. Revisar el historial del escenario antes de actuar.
+- Filas inelegibles (sin contacto, suprimidas, bloqueadas o igual al emisor)
+  se marcan `failed` y no se envían.
+
+Variables de entorno:
+
+| Variable | Uso |
+| --- | --- |
+| `ACQUISITION_LIVE_ENABLED` | Solo `true` habilita el envío en vivo. Cualquier otro valor: 503. |
+| `MAKE_DISPATCH_WEBHOOK_URL` | Webhook HTTPS `hook.*.make.com` del escenario. |
+| `MAKE_DISPATCH_API_KEY` | Se envía como cabecera `x-make-apikey`; configurar la misma clave en el webhook de Make (API key authentication). Obligatoria en vivo. |
+| `CRON_SECRET` | Lo genera/usa Vercel para el cron; mínimo 32 caracteres. |
+| `OUTREACH_AUTOMATION_SECRET` | Bearer de las rutas manuales de despacho; mínimo 32 caracteres. |
+| `ACQUISITION_CALLBACK_SECRET` | Bearer que Make usa al llamar `POST /api/webhooks/acquisition`; mínimo 32 caracteres. |
+| `ACQUISITION_CALLBACKS_ENABLED` | Solo `true` registra eventos (`acq_event`); si no, 503 tras validar. |
+| `WHATSAPP_SENDER_PHONE` | Opcional: excluye reservas cuyo teléfono coincide con el emisor. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Obligatoria: las funciones `acq_*` solo se otorgan a `service_role`. |
+
+Orden de activación sugerido: aplicar la migración en un entorno revisado,
+habilitar primero callbacks, probar con un único contacto propio con
+consentimiento y luego activar `ACQUISITION_LIVE_ENABLED`.
+
 ## Límites y trabajo pendiente
 
 - El flujo antiguo todavía guarda `Pitch Sent` al recibir 2xx de Make; el

@@ -1,3 +1,11 @@
 export function authorized(header:string|null,secret:string|undefined):boolean;
 export function dispatch(input:{stage:string,store:{preview(stage:string):Promise<unknown[]>},preview?:boolean}):Promise<unknown>;
 export function eventInput(input:unknown):Record<string,unknown>;
+export const stages:string[];
+export type Reservation={id:string,phone:string,stage:string};
+export type Contact={phone:string,lead_id:string,business_name:string,suppressed:boolean};
+export type LiveLead={reservation_id:string,preview_lead_id:string,phone:string,business_name:string,consent_verified:true,suppressed:false,sequence_stage:string};
+export type LiveBody={sequence_stage:string,count:number,leads:LiveLead[]};
+export function livePayload(stage:string,reservations:Reservation[],contacts:Contact[],sender?:string):{body:LiveBody,ineligible:string[]};
+export type LiveResult={dry_run:false,sequence_stage:string,dispatched:number,outcome?:'accepted'|'rejected'|'unknown',error?:string,reservation_ids?:string[],ineligible?:number};
+export function liveDispatch(input:{stage:string,sender?:string,send(body:LiveBody):Promise<void>,store:{reserve(stage:string):Promise<Reservation[]>,contacts(phones:string[]):Promise<Contact[]>,markFailed(ids:string[]):Promise<unknown>}}):Promise<LiveResult>;
