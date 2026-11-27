@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabase, resolveSupabaseEnv } from "@/lib/supabase";
+import { phone as crMobile } from "@/lib/acquisition.mjs";
+
+const WHATSAPP_CONSENT_TEXT = "Autorizo a BizMapShield a contactarme por WhatsApp sobre mi prueba gratis de 14 días, con información y ofertas de sus servicios. Puedo darme de baja en cualquier momento respondiendo SALIR.";
 
 export const runtime = "nodejs";
 
@@ -89,7 +92,21 @@ export async function POST(request: Request) {
       console.error("[shieldy-lead] pipeline sync failed:", pipelineError.code);
       return NextResponse.json({ error: "Could not sync lead" }, { status: 500 });
     }
-    return NextResponse.json({ ok: true, created: Boolean(data), crm_synced: true }, { status: 200 });
+    // Self-service trial funnel: an explicit WhatsApp consent records the merchant in the
+    // acquisition pipeline (dedupe by phone, customers and blocked numbers excluded).
+    let trial: string = "not_requested";
+    const waPhone = crMobile(phone);
+    if (input.consent_whatsapp === true && waPhone) {
+      const evidence = `Shieldy ${new Date().toISOString()} · consent_whatsapp=true · "${WHATSAPP_CONSENT_TEXT}"`;
+      const { data: status, error: regError } = await db.rpc("acq_register", {
+        p_phone: waPhone, p_lead_id: leadId, p_business: company, p_name: name, p_evidence: evidence,
+      });
+      if (regError) {
+        console.error("[shieldy-lead] trial registration failed:", regError.code);
+        trial = "error";
+      } else trial = String(status);
+    } else if (input.consent_whatsapp === true) trial = "invalid_phone";
+    return NextResponse.json({ ok: true, created: Boolean(data), crm_synced: true, trial }, { status: 200 });
   } catch (error) {
     console.error("[shieldy-lead] unexpected error", error);
     return NextResponse.json({ error: "Could not save lead" }, { status: 500 });

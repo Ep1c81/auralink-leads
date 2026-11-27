@@ -9,3 +9,4 @@ export type LiveBody={sequence_stage:string,count:number,leads:LiveLead[]};
 export function livePayload(stage:string,reservations:Reservation[],contacts:Contact[],sender?:string):{body:LiveBody,ineligible:string[]};
 export type LiveResult={dry_run:false,sequence_stage:string,dispatched:number,outcome?:'accepted'|'rejected'|'unknown',error?:string,reservation_ids?:string[],ineligible?:number};
 export function liveDispatch(input:{stage:string,sender?:string,send(body:LiveBody):Promise<void>,store:{reserve(stage:string):Promise<Reservation[]>,contacts(phones:string[]):Promise<Contact[]>,markFailed(ids:string[]):Promise<unknown>}}):Promise<LiveResult>;
+export function phone(raw:unknown):string|null;
