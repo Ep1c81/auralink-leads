@@ -36,6 +36,6 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Unit tests (network-free)
-        run: node --test tests/acquisition.test.mjs tests/make-dispatch.test.mjs
+        run: node --test tests/acquisition.test.mjs tests/make-dispatch.test.mjs tests/funnel.test.mjs
       - name: Build application
         run: npm run build

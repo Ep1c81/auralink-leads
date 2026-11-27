@@ -144,3 +144,14 @@ consentimiento y luego activar `ACQUISITION_LIVE_ENABLED`.
 
 Referencias: https://apps.make.com/whatsapp-business-cloud-modules y
 https://help.make.com/webhooks .
+
+## Self-service 14-day trial funnel (Shieldy → WhatsApp)
+
+1. Shieldy (bizmapshield.vercel.app) sends `consent_whatsapp: true` with the registration. `/api/integrations/shieldy` calls `acq_register()` (dedupe by phone; customers, blocked numbers and New Life excluded) and the visitor is sent to WhatsApp with a prepared message, so the merchant writes first (free 24h window).
+2. Make "Integration WhatsApp Business Cloud" forwards each inbound message (`text`, `button`) to `/api/webhooks/acquisition`. The CRM records it once (`acq_event` returns false for retries) and runs the deterministic engine in `src/lib/funnel.mjs`.
+3. The response `{to, reply, notify}` tells Make what to send back inside the 24h window and what to email to Alex.
+4. Merchants who registered but never opened WhatsApp stay eligible for the 5/day `pitch_1` template run.
+
+| Env var | Effect |
+| --- | --- |
+| `ACQUISITION_BOT_ENABLED` | `true` = the CRM returns bot replies. Off = no replies, but every inbound message still produces an alert for Alex. |
